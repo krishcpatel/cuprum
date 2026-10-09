@@ -1,0 +1,243 @@
+// SPDX-License-Identifier: LGPL-3.0-only
+package com.krishcpatel.cuprum.engine.metal;
+
+import com.krishcpatel.cuprum.bridge.MetalBackendNative;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.commands.GpuQueryPool;
+import com.mojang.renderpearl.api.commands.RenderPassDescriptor;
+import com.mojang.renderpearl.api.pipeline.IndexType;
+import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
+import com.mojang.renderpearl.api.pipeline.UniformType;
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
+import com.mojang.renderpearl.backend.api.RenderPassBackend;
+import com.mojang.renderpearl.util.TextureViewAndSampler;
+import org.lwjgl.PointerBuffer;
+
+import java.nio.ByteBuffer;
+import java.nio.IntBuffer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Supplier;
+
+final class MetalPass implements RenderPassBackend, AutoCloseable {
+    final MetalDevice device;
+    final MetalEncoder encoder;
+    final RenderPassDescriptor descriptor;
+    final int depthFormat;
+    MetalPipeline pipeline;
+    GpuBuffer indices;
+    IndexType indexType = IndexType.INT;
+    final List<Long> texelViews = new ArrayList<>();
+    private boolean closed;
+
+    private void check() {
+        device.checkThread();
+        if (closed) throw new IllegalStateException("Metal render pass is closed");
+    }
+
+    MetalPass(MetalDevice device, MetalEncoder encoder, RenderPassDescriptor descriptor) {
+        this.device = device;
+        this.encoder = encoder;
+        this.descriptor = descriptor;
+        long[] colors = new long[descriptor.colorAttachments().size()];
+        double[] clear = new double[colors.length * 5];
+        for (int i = 0; i < colors.length; i++) {
+            var a = descriptor.colorAttachments().get(i);
+            if (a != null) {
+                colors[i] = ((MetalResources.View) a.textureView()).handle();
+                if (a.clearValue().isPresent()) {
+                    var c = a.clearValue().get();
+                    clear[i * 5] = 1;
+                    clear[i * 5 + 1] = c.x();
+                    clear[i * 5 + 2] = c.y();
+                    clear[i * 5 + 3] = c.z();
+                    clear[i * 5 + 4] = c.w();
+                }
+            }
+        }
+        var depth = descriptor.depthAttachment();
+        depthFormat = depth == null ? -1 : depth.textureView().texture().getFormat().ordinal();
+        var area = descriptor.renderArea();
+        MetalBackendNative.beginPass(device.handle, colors, clear, depth == null ? 0 : ((MetalResources.View) depth.textureView()).handle(), depth == null ? -1 : depth.clearValue().orElse(-1), area.x(), area.y(), area.width(), area.height());
+    }
+
+    @Override
+    public void setPipeline(BackendRenderPipeline pipeline) {
+        check();
+        device.requireOwned(pipeline);
+        this.pipeline = (MetalPipeline) pipeline;
+        MetalBackendNative.bindPipeline(device.handle, this.pipeline.variant(depthFormat));
+    }
+
+    @Override
+    public void setUniform(int index, Object value) {
+        check();
+        if (value == null) return;
+        if (value instanceof TextureViewAndSampler pair) {
+            device.requireOwned(pair.view());
+            device.requireOwned(pair.sampler());
+            MetalBackendNative.bindTexture(device.handle, index, ((MetalResources.View) pair.view()).handle(), ((MetalResources.Sampler) pair.sampler()).handle());
+        } else if (value instanceof GpuBufferSlice slice) {
+            device.requireOwned(slice.buffer());
+            var buffer = (MetalResources.Buffer) slice.buffer();
+            if (pipeline.info.uniforms().get(index).type() == UniformType.TEXEL_BUFFER) {
+                long view = MetalBackendNative.texelView(device.handle, buffer.handle(), slice.offset(), slice.length(), pipeline.info.uniforms().get(index).gpuFormat().ordinal());
+                texelViews.add(view);
+                MetalBackendNative.bindTexture(device.handle, index, view, 0);
+            } else MetalBackendNative.bindBuffer(device.handle, index, buffer.handle(), slice.offset());
+        } else throw new IllegalArgumentException("Unsupported Metal uniform value: " + value.getClass());
+    }
+
+    @Override
+    public void pushConstants(ByteBuffer bytes) {
+        check();
+        var slice = encoder.transientMemory.uploadGpu(bytes, device.info.limits().minUniformOffsetAlignment(), GpuBuffer.USAGE_UNIFORM);
+        MetalBackendNative.bindBuffer(device.handle, 15, ((MetalResources.Buffer) slice.buffer()).handle(), slice.offset());
+    }
+
+    @Override
+    public void setVertexBuffer(int slot, GpuBufferSlice buffer) {
+        check();
+        if (buffer != null) device.requireOwned(buffer.buffer());
+        if (slot >= 15)
+            throw new IllegalArgumentException("Metal exposes 15 vertex slots after reserving constant bindings");
+        MetalBackendNative.bindBuffer(device.handle, slot + 16, buffer == null ? 0 : ((MetalResources.Buffer) buffer.buffer()).handle(), buffer == null ? 0 : buffer.offset());
+    }
+
+    @Override
+    public void setIndexBuffer(GpuBuffer buffer, IndexType type) {
+        check();
+        if (buffer != null) device.requireOwned(buffer);
+        indices = buffer;
+        indexType = type;
+    }
+
+    private int primitive() {
+        return switch (pipeline.info.primitiveTopology()) {
+            case POINTS -> 0;
+            case DEBUG_LINES -> 1;
+            case DEBUG_LINE_STRIP -> 2;
+            case TRIANGLE_STRIP -> 4;
+            case TRIANGLES, QUADS, LINES, TRIANGLE_FAN -> 3;
+        };
+    }
+
+    @Override
+    public void drawIndexed(int count, int instances, int first, int baseVertex, int baseInstance) {
+        check();
+        if (pipeline.info.primitiveTopology() == PrimitiveTopology.TRIANGLE_FAN) {
+            MetalBackendNative.drawIndexedFan(device.handle, count, instances, ((MetalResources.Buffer) indices).handle(), (long) first * indexType.bytes, indexType.ordinal(), baseVertex, baseInstance);
+            return;
+        }
+        MetalBackendNative.draw(device.handle, primitive(), count, instances, 0, baseInstance, ((MetalResources.Buffer) indices).handle(), (long) first * indexType.bytes, indexType.ordinal(), baseVertex);
+    }
+
+    @Override
+    public void draw(int count, int instances, int first, int baseInstance) {
+        check();
+        if (pipeline.info.primitiveTopology() == PrimitiveTopology.TRIANGLE_FAN) {
+            if (count < 3) return;
+            int elements = Math.multiplyExact(count - 2, 3);
+            var mapped = encoder.transientMemory.allocateGpuMapped((long) elements * 4, 4, GpuBuffer.USAGE_INDEX);
+            var data = mapped.data().order(java.nio.ByteOrder.nativeOrder()).asIntBuffer();
+            for (int i = 1; i < count - 1; i++) data.put(first).put(first + i).put(first + i + 1);
+            MetalBackendNative.draw(device.handle, 3, elements, instances, 0, baseInstance, ((MetalResources.Buffer) mapped.slice().buffer()).handle(), mapped.slice().offset(), 1, 0);
+        } else MetalBackendNative.draw(device.handle, primitive(), count, instances, first, baseInstance, 0, 0, 0, 0);
+    }
+
+    @Override
+    public void multiDrawIndexed(IntBuffer draws, int instances, int firstInstance, int count) {
+        check();
+        for (int i = 0; i < count; i++) {
+            int b = draws.position() + i * 3;
+            drawIndexed(draws.get(b + 1), instances, draws.get(b), draws.get(b + 2), firstInstance);
+        }
+    }
+
+    @Override
+    public void multiDrawIndexed(PointerBuffer offsets, IntBuffer counts, IntBuffer bases, int count) {
+        check();
+        for (int i = 0; i < count; i++)
+            drawIndexed(counts.get(counts.position() + i), 1, (int) (offsets.get(offsets.position() + i) / indexType.bytes), bases.get(bases.position() + i), 0);
+    }
+
+    @Override
+    public void multiDraw(IntBuffer draws, int instances, int base, int count) {
+        check();
+        for (int i = 0; i < count; i++)
+            draw(draws.get(draws.position() + i * 2 + 1), instances, draws.get(draws.position() + i * 2), base);
+    }
+
+    @Override
+    public void multiDraw(IntBuffer first, IntBuffer counts, int count) {
+        check();
+        for (int i = 0; i < count; i++) draw(counts.get(counts.position() + i), 1, first.get(first.position() + i), 0);
+    }
+
+    @Override
+    public void drawIndirect(GpuBufferSlice commands, int count) {
+        check();
+        for (int i = 0; i < count; i++) {
+            if (pipeline.info.primitiveTopology() == PrimitiveTopology.TRIANGLE_FAN)
+                MetalBackendNative.drawIndirectFan(device.handle, ((MetalResources.Buffer) commands.buffer()).handle(), commands.offset() + (long) i * 16, 0, 0);
+            else
+                MetalBackendNative.drawIndirect(device.handle, primitive(), ((MetalResources.Buffer) commands.buffer()).handle(), commands.offset() + (long) i * 16, 0, 0);
+        }
+    }
+
+    @Override
+    public void drawIndexedIndirect(GpuBufferSlice commands, int count) {
+        check();
+        for (int i = 0; i < count; i++) {
+            if (pipeline.info.primitiveTopology() == PrimitiveTopology.TRIANGLE_FAN)
+                MetalBackendNative.drawIndirectFan(device.handle, ((MetalResources.Buffer) commands.buffer()).handle(), commands.offset() + (long) i * 20, ((MetalResources.Buffer) indices).handle(), indexType.ordinal());
+            else
+                MetalBackendNative.drawIndirect(device.handle, primitive(), ((MetalResources.Buffer) commands.buffer()).handle(), commands.offset() + (long) i * 20, ((MetalResources.Buffer) indices).handle(), indexType.ordinal());
+        }
+    }
+
+    @Override
+    public void enableScissor(int x, int y, int w, int h) {
+        check();
+        var a = descriptor.renderArea();
+        int left = Math.max(x, a.x()), top = Math.max(y, a.y());
+        int right = Math.min(x + w, a.x() + a.width()), bottom = Math.min(y + h, a.y() + a.height());
+        MetalBackendNative.scissor(device.handle, left, top, Math.max(0, right - left), Math.max(0, bottom - top));
+    }
+
+    @Override
+    public void disableScissor() {
+        check();
+        var a = descriptor.renderArea();
+        MetalBackendNative.scissor(device.handle, a.x(), a.y(), a.width(), a.height());
+    }
+
+    @Override
+    public void pushDebugGroup(Supplier<String> label) {
+        check();
+        MetalBackendNative.debugGroup(device.handle, label.get(), true);
+    }
+
+    @Override
+    public void popDebugGroup() {
+        check();
+        MetalBackendNative.debugGroup(device.handle, "", false);
+    }
+
+    @Override
+    public void writeTimestamp(GpuQueryPool pool, int index) {
+        check();
+        device.requireOwned(pool);
+        ((MetalQueries) pool).write(index);
+    }
+
+    @Override
+    public void close() {
+        device.checkThread();
+        if (closed) return;
+        closed = true;
+        texelViews.forEach(MetalBackendNative::release);
+        texelViews.clear();
+    }
+}
