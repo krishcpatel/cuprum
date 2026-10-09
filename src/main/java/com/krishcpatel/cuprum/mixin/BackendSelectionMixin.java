@@ -15,7 +15,7 @@ public abstract class BackendSelectionMixin {
     @Inject(method = "getBackendsToTry", at = @At("HEAD"), cancellable = true)
     private void cuprum$chooseBackend(CallbackInfoReturnable<GpuBackend[]> callback) {
         if (CuprumBackend.enabled()) {
-            // An explicit Metal request fails honestly until the game adapter exists.
+            // Metal is the default and has no automatic graphics-API fallback.
             // Diagnostic mode stays usable through OpenGL and never tries Vulkan.
             callback.setReturnValue(CuprumBackend.takeoverRequested()
                     ? new GpuBackend[]{new CuprumBackend()} : new GpuBackend[]{new GlBackend()});

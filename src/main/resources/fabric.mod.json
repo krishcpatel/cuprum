@@ -3,7 +3,7 @@
   "id": "cuprum",
   "version": "${version}",
   "name": "Cuprum",
-  "description": "Experimental direct Apple Metal renderer foundation for Minecraft 26.3 on Apple Silicon.",
+  "description": "Direct Apple Metal rendering backend for Minecraft 26.3 on macOS.",
   "authors": ["Krish C. Patel"],
   "contact": {},
   "license": "LGPL-3.0-only",

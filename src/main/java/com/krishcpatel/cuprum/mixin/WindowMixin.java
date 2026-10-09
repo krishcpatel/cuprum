@@ -20,7 +20,7 @@ public abstract class WindowMixin {
             var window = CocoaMetalBridge.windowInfo(callback.getReturnValue());
             CuprumMod.LOGGER.info("Cocoa window ready; Retina backing scale: {}", window.scale());
             // CuprumBackend creates SDL_WINDOW_METAL, without an OpenGL context.
-            // The future Metal device adapter must attach exactly one Metal view.
+            // The Metal device adapter attaches exactly one SDL-managed Metal view.
         }
     }
 }

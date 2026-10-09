@@ -24,8 +24,8 @@ public final class MetalNative {
             if (override != null) {
                 library = Path.of(override).toRealPath();
             } else {
-                try (var resource = MetalNative.class.getResourceAsStream("/native/macos-arm64/libcuprum_metal.dylib")) {
-                    if (resource == null) throw new IOException("The Cuprum ARM64 native bridge is missing. Build on macOS with Xcode Command Line Tools.");
+                try (var resource = MetalNative.class.getResourceAsStream("/native/macos-universal/libcuprum_metal.dylib")) {
+                    if (resource == null) throw new IOException("The Cuprum universal macOS native bridge is missing. Build on macOS with Xcode Command Line Tools.");
                     library = Files.createTempFile("cuprum-metal-", ".dylib");
                     library.toFile().deleteOnExit();
                     Files.copy(resource, library, StandardCopyOption.REPLACE_EXISTING);

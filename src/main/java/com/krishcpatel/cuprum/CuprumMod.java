@@ -8,7 +8,7 @@ import net.fabricmc.api.ClientModInitializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** Native diagnostics only; the independent Metal renderer is exercised by nativeSmoke. */
+/** Initializes the direct Metal bridge before RenderPearl selects the graphics backend. */
 public final class CuprumMod implements ClientModInitializer {
     public static final Logger LOGGER = LoggerFactory.getLogger("Cuprum");
 
@@ -28,10 +28,10 @@ public final class CuprumMod implements ClientModInitializer {
             CocoaMetalBridge.DeviceInfo metal = CocoaMetalBridge.deviceInfo();
             LOGGER.info("Direct Metal device: {}; registry ID: 0x{}; unified memory: {}", metal.name(),
                     Long.toUnsignedString(metal.registryId(), 16), metal.unifiedMemory());
-            LOGGER.info("Cuprum direct Metal foundation loaded. The Minecraft device adapter is pending; "
-                    + "diagnostic mode uses Minecraft's OpenGL renderer. Run nativeSmoke to exercise Metal.");
+            LOGGER.info("Cuprum direct Metal backend loaded; "
+                    + "RenderPearl will select the Metal device unless diagnostic mode is explicitly requested.");
         } catch (RuntimeException | LinkageError error) {
-            LOGGER.error("Cuprum could not initialize its direct Metal bridge. Use macOS 13+, ARM64 Java 25, "
+            LOGGER.error("Cuprum could not initialize its direct Metal bridge. Use macOS 13+, Java 25 for ARM64 or x86_64, "
                     + "and a build containing libcuprum_metal.dylib.", error);
         }
     }

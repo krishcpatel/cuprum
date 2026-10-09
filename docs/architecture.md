@@ -1,160 +1,133 @@
 # Direct Metal architecture for Minecraft 26.3
 
-Cuprum's native rendering path is now:
-
 ```mermaid
 flowchart LR
-    A[Java MetalRenderer and CuprumPipeline] --> B[Typed JNI bridge]
-    B --> C[MTLCommandQueue and MTLRenderPipelineState]
-    C --> D[MTLRenderCommandEncoder]
-    D --> E[CAMetalLayer drawable]
-    E --> F[Apple Metal GPU]
-    G[SDL3 Cocoa window] --> E
+    MC[Minecraft / RenderPearl frontend] --> D[MetalDevice]
+    SPV[Vanilla shader frontend: SPIR-V] --> MSL[SPIRV-Cross: MSL]
+    MSL --> PSO[Cached Metal libraries and pipeline states]
+    D --> JNI[MetalBackendNative / JNI]
+    PSO --> JNI
+    JNI --> GPU[Metal command queue and encoders]
+    GPU --> S[CAMetalLayer drawable]
+    SDL[SDL3 Cocoa window and Metal view] --> S
 ```
 
-This path executes no Vulkan commands and uses no MoltenVK translation. Native MSL
-is compiled by `MTLDevice.newLibraryWithSource`, and the actual render pipeline is
-created by `newRenderPipelineStateWithDescriptor`.
+There is no Vulkan runtime in this path. SPIR-V is an intermediate shader format,
+and SPIRV-Cross is a shader compiler, not a Vulkan driver.
 
-## What is implemented
+## Window and backend selection
 
-`CocoaMetalBridge` obtains the macOS NSWindow through SDL3's native window property,
-queries its contentView and Retina backing scale, and creates an SDL-managed
-layer-hosting Metal view. SDL manages the view's Cocoa resize notifications;
-Cuprum re-queries backing scale and framebuffer pixel dimensions each frame.
-`MetalRenderer` supplies drawableSize in pixels before acquiring nextDrawable.
+`BackendSelectionMixin` selects Cuprum by default on supported Macs. The native
+library bootstrap bypasses Minecraft's Vulkan loader. `CuprumBackend` creates an
+`SDL_WINDOW_METAL` window without OpenGL or Vulkan flags, then returns a
+`FrontendGpuDevice` backed by `MetalDevice`.
 
-`MetalNative` loads the packaged ARM64 JNI bridge. An optional absolute library
-path can be provided with `-Dcuprum.nativeLibrary=/path/to/libcuprum_metal.dylib` for
-native debugging. The bridge owns the device, command queue, sampler, native MSL
-library's PSO, and active frame objects through Objective-C ARC.
+`CocoaMetalBridge` obtains the NSWindow through SDL's Cocoa window property and
+queries contentView and backingScaleFactor using ABI-correct Objective-C calls.
+`SDL_Metal_CreateView` creates and owns the layer-hosting NSView and CAMetalLayer,
+preserving SDL's input and resize handling. The attachment owns the SDL Metal view
+and destroys it on the macOS main thread. Surface acquisition refreshes Retina
+scale and sets drawableSize from the framebuffer configuration in pixels.
 
-`MetalRenderer` wraps native handles with explicit ownership and thread checks. It
-owns allocated buffers and textures, and borrows the Metal layer. Native allocations
-are immutable uploads in shared storage; dynamic uploads currently allocate a new
-buffer rather than overwriting memory the GPU may still be reading.
+Minecraft 26.3 has no GLFW window, `BufferRenderer.drawWithShader`, or old
+Tessellator flush contract. Implementing its backend interfaces intercepts all
+vanilla submissions, including terrain, GUI, textures, lightmaps and post passes.
+The five mixins are narrowly scoped to backend selection, library bootstrap,
+window diagnostics, RenderSystem diagnostics and the frame presentation boundary.
 
-`CuprumPipeline` demonstrates the position/color/texture shader family, including
-vertex and uniform uploads and a real draw. This pipeline is implemented for its
-own MSL shader; it does not compile Minecraft's full shader library or shader packs.
+## Shader and pipeline translation
 
-`NativeSmoke` exercises the complete path with a textured triangle. Native image
-inspection additionally verifies that no Vulkan loader or MoltenVK dylib was
-loaded in the process.
+RenderPearl compiles each vanilla GLSL variant to SPIR-V and remaps attributes and
+uniform bindings. `MetalPipeline` translates those modules with a separate
+SPIRV-Cross context per compilation worker. It requests MSL 2.4, native texture
+buffers, and a vertex Y flip matching RenderPearl's zero-to-one coordinate
+convention. Counter-clockwise source geometry becomes clockwise after this flip;
+the native render encoder uses clockwise front faces. Presentation performs the
+final texture-orientation conversion.
 
-## PSO and shader layout
+The backend preserves reflected vertex offsets, formats, strides and instance
+step rates in MTLVertexDescriptor. Metal buffer slots 0–14 hold uniform blocks,
+slot 15 holds push constants, and slots 16–30 hold vertex buffers. Texture and
+sampler slots match the frontend's uniform binding indices. Extra bindings fail
+with a clear error rather than silently aliasing slots.
 
-The color attachment is BGRA8Unorm, the primitive topology is triangles, and the
-initial pipeline uses a color-only pass without depth or blending. The native
-vertex descriptor binds:
+Translated source and entry points outlive the SPIR-V modules. Native shader
+libraries are cached by source; immutable PSOs are cached per Java pipeline and
+actual depth attachment format. PSOs carry attachment formats, blend equations,
+write masks and depth state. Culling, wireframe and depth bias are set when binding
+the pipeline. Current RenderPearl exposes depth/bias through DepthStencilState;
+it does not expose legacy GlStateManager stencil operations. Packed depth/stencil
+attachments are retained across passes, without inventing nonexistent stencil hooks.
 
-| Attribute | Format | Byte offset |
-|---|---|---|
-| Position | float3 | 0 |
-| Color | normalized unsigned RGBA8 | 12 |
-| UV | float2 | 16 |
+Metal cannot sample three-component RGB texture formats; these are rejected.
+D24/S8 is used only on devices advertising that format, never reinterpreted as
+D32/S8 with a different byte layout. Vanilla's normal RGBA and D32 resources are
+supported. Optional device formats and Intel-specific behavior need hardware testing.
 
-Vertex stride is 24 bytes, with per-vertex stepping and buffer index 0. The uniform
-block is an 80-byte, 16-byte-aligned layout: a column-major float4x4 MVP followed by
-a float4 tint. It binds at vertex buffer index 1. The sampled RGBA8 texture and
-nearest/clamp sampler bind at fragment index 0. No descriptor sets, Vulkan handles,
-or SPIR-V shader module are involved in this native implementation.
+## Commands, memory and synchronization
 
-The MSL shader currently applies the MVP matrix and multiplies sampled texture
-color by vertex color and tint. The MVP must use Metal's 0..1 clip-space depth
-convention when expanded to depth-tested geometry.
+`MetalEncoder` provides clears, render passes, uploads, copies, fences and queries.
+`MetalPass` binds resources and submits direct, indexed, instanced and indirect
+draws. Multiple indirect draws are encoded individually. Direct triangle fans are
+expanded into shared index buffers; indexed fans use a GPU compute expansion.
+Indirect fans resolve their GPU argument counts before allocating the expanded
+stream; this uncommon compatibility path synchronizes and is slower than other draws.
+Render pass splits preserve attachments, bindings, viewport, scissor and debug groups.
 
-## Frame and resource lifetime
+Buffers use shared storage. Three upload arenas hold reusable pages, fence every
+submission and wait only when reusing an arena whose GPU work is unfinished.
+Write-mapped Minecraft ring buffers rely on Minecraft's fences before reuse;
+read maps synchronize. Uniform allocations include trailing padding required by
+MSL structure alignment, while Java exposes the requested logical byte length.
+Misaligned texel-buffer slices are copied into aligned storage before binding.
 
-1. Query drawable size in pixels and begin a frame. Zero-sized or temporarily
-   unavailable surfaces return no frame.
-2. Acquire a CAMetalLayer drawable, allocate a command buffer and begin the render
-   encoder with explicit clear/store actions.
-3. Bind the PSO, vertex/UBO buffers, texture and sampler; record triangle draws.
-4. End encoding, schedule the drawable presentation, and commit once.
+Textures use private storage, with shared staging buffers for transfers. CPU pixel
+uploads and readbacks use padded rows; readback callbacks strip that padding after
+GPU completion. Callback polling happens before an arena can overwrite its staging
+pages. Completed command buffers remain retained until all owning fences and
+callbacks release them. Encoded Metal commands retain their resource objects, so
+closing a Java resource does not free an allocation already referenced by a command.
 
-A frame must be submitted explicitly. Closing an unsubmitted frame cancels its
-command buffer; it does not display partially recorded work. A renderer allows
-only one CPU-recorded frame at a time. Normal submission is asynchronous and uses
-Metal's default retained resource references. GPU failures are reported by a
-native completion handler; diagnostic readback waits for completion and throws on
-command-buffer failure.
+All queue encoding and resource management occur on the creating render thread.
+Only shader translation runs on compilation workers. JNI objects have explicit
+retained handles, ARC ownership and per-call autorelease pools. Device shutdown
+waits for submitted work, completes callbacks and closes owned resources.
 
-Diagnostic readback inserts a Metal blit into a shared buffer, respects 256-byte
-row alignment, waits for completion, and returns tightly packed top-down BGRA8
-pixels. The layer's framebufferOnly property is disabled for this test capability;
-a future production path should enable it when readback/blits are unnecessary.
+## Presentation and timestamps
 
-Buffers and textures can release their owning reference after submission because
-Metal command buffers retain encoded resources through completion. Closing the
-renderer drains its serial queue before releasing the device and resources.
-**Close renderer → close layer attachment → destroy SDL window.** Every view,
-frame and resource operation uses the Cocoa main thread. JNI never uses a saved
-JNIEnv from an asynchronous Metal completion handler.
+The surface acquires at most one drawable per frame and uses CAMetalLayer's three
+available drawables. A fullscreen pass scales the game's color texture into a
+framebuffer-only BGRA8 drawable. Presentation is scheduled on the same command
+buffer before Minecraft submits it; the later `GpuSurface.present` hook releases
+the surface's acquired reference. A three-permit semaphore bounds in-flight
+command buffers and completion handlers release permits.
 
-## Minecraft adapter boundary
+Zero-sized or iconified surfaces produce SurfaceException and let Minecraft retry;
+configuration changes resize the layer on the next acquisition. FIFO and immediate
+presentation map to CAMetalLayer.displaySyncEnabled.
 
-Minecraft 26.3 uses SDL3 windows, unobfuscated class names, and RenderPearl's
-`GpuBackend`/`GpuDeviceBackend` APIs. Cuprum no longer extends the game's Vulkan
-backend. `CuprumBackend` implements `GpuBackend` directly and can create an
-SDL_WINDOW_METAL window and load the native bridge.
+Minecraft constructs TimerQuery unconditionally. Query pools use actual Metal
+counter sample buffers and return values only after the recorded command buffer
+completes. GPUs with draw-boundary counters sample directly. Stage-boundary GPUs
+split and restore an active render encoder and insert a sampled blit encoder.
+A small marker operation ensures timestamp encoders are not optimized away.
+Calibration samples the device GPU clock against Java's monotonic clock.
 
-A working native draw does not satisfy the complete RenderPearl device contract.
-`createDevice` therefore reports a clear `BackendCreationException` until a real
-adapter exists. It does not silently create a Vulkan or OpenGL device. Explicit
-Metal selection has no fallback. Default diagnostic mode chooses vanilla OpenGL
-and is labeled accordingly in logs and documentation.
+## Native files and verification
 
-`NativeLibrariesBootstrapMixin` skips Minecraft's early Vulkan loader probe on
-supported Macs while Cuprum is enabled. `BackendSelectionMixin` excludes Vulkan
-from backend attempts. The bootstrap flag also prevents Minecraft's default
-Vulkan availability check from loading a device. Minecraft still declares Vulkan
-jars in its own library list; removing those jars would change the game
-installation rather than just this mod. They are not part of Cuprum's rendering
-path.
+`cuprum_backend.m` and `MetalBackendNative` implement the game backend. The original
+`cuprum_metal.m`, `MetalNative`, `MetalRenderer` and `CuprumPipeline` also retain a
+small independent MSL rendering diagnostic used by `NativeSmoke`. Both native
+implementations are linked into one universal macOS dylib; neither links Vulkan.
 
-`WindowMixin` and `RenderSystemMixin` remain version-specific integration seams.
-The presentation hook wraps `Minecraft.renderFrame(boolean)`'s
-`GpuSurface.present()` call. In diagnostic mode that is the OpenGL surface; it
-becomes useful for Metal only after an actual Metal surface adapter is supplied.
-It never acquires a second drawable or submits a duplicate frame.
+Verification includes the native GPU readback test and a Java encoder test with
+12 submissions, asynchronous callbacks and repeated arena rotation. The Fabric
+client loaded vanilla shaders and texture atlases, rendered the title screen and
+entered a single-player world on an M1 Pro under Metal API validation. GPU frame
+captures were inspected for lighting, textures, text and orientation. A process
+library map showed Cuprum's Metal dylib with no Vulkan loader or MoltenVK.
 
-## Remaining renderer work
-
-A playable Metal game backend must implement the actual 26.3 interfaces:
-
-- `GpuDeviceBackend`: textures/views, buffers, samplers, pipeline compilation,
-  device limits/features, debug information and timestamp queries.
-- `CommandEncoderBackend`: render-pass creation, transient allocations, all
-  buffer/texture upload and copy paths, fences and submission.
-- `RenderPassBackend`: arbitrary PSO bindings, uniform/texture binding remaps,
-  push constants, depth/stencil, blend/scissor state, indexed/instanced/indirect
-  draws and optional multi-draw capabilities.
-- `GpuSurfaceBackend`: configuration, acquisition, texture-to-drawable blit,
-  synchronization, presentation, resize/minimize recovery and shutdown.
-
-The shader integration must also supply MSL for Minecraft's pipeline library and
-match its bind-group and vertex layouts. RenderPearl's existing frontend exposes
-compiled shader IR to its backend; adapting or replacing that frontend is a
-separate shader-compiler task. A standalone shader translator can be used without
-a Vulkan runtime, but the current renderer uses handwritten MSL and has no such
-translator dependency. Missing capabilities must be reported honestly rather
-than returning dummy resources or skipping required draws.
-
-Implement and validate these contracts incrementally before enabling Metal game
-rendering by default. Compatibility with resource reloads, offscreen passes,
-world rendering, shader packs and other rendering mods needs dedicated coverage.
-
-## Validation
-
-Direct Metal validation on an Apple M1 Pro passed: 120 textured frames, exact GPU
-pixel readback (RGBA 200/110/60/255), drawable resize, zero-extent skip, frame
-cancellation/recovery, and absence of loaded Vulkan/MoltenVK dylibs. Metal reports
-unified memory. Platform guard tests cover ARM64 Java and macOS version handling.
-A Fabric diagnostic launch also applied all five mixins, selected OpenGL, and
-loaded game resources. Process memory-image inspection found no Vulkan loader or
-MoltenVK dylib. The diagnostic client was deliberately stopped with SIGTERM;
-Gradle reports exit code 143 for that stop, rather than a clean game exit.
-Mixed-DPI movement, prolonged GPU stress and multiple concurrent surfaces remain
-untested. The previous Vulkan game-startup validation does not apply to this new
-renderer architecture.
+Intel compilation is verified by the universal binary's two architecture slices.
+Intel runtime behavior, shader packs, extensive mod compatibility, all dimensions
+and long-duration performance are not established by this validation. Direct, indexed and indirect fan conversion is covered by the native test. No general performance
+improvement is claimed from a single development session.

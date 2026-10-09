@@ -18,9 +18,10 @@ public final class HostPlatform {
         if (!(normalized.equals("mac os x") || normalized.equals("macos") || normalized.equals("darwin"))) {
             return Optional.of("Cuprum requires macOS 13 or newer; detected " + os + ".");
         }
-        if (!(arch.equalsIgnoreCase("aarch64") || arch.equalsIgnoreCase("arm64"))) {
-            return Optional.of("Cuprum requires an ARM64 Java runtime on Apple Silicon; detected " + arch
-                    + ". Install Java 25 for macOS ARM64 (do not run Java under Rosetta).");
+        if (!(arch.equalsIgnoreCase("aarch64") || arch.equalsIgnoreCase("arm64")
+                || arch.equalsIgnoreCase("x86_64") || arch.equalsIgnoreCase("amd64"))) {
+            return Optional.of("Cuprum requires an ARM64 or x86_64 Java runtime on macOS; detected " + arch
+                    + ". Install Java 25 for your Mac architecture.");
         }
         try {
             if (Integer.parseInt(version.split("\\.")[0]) >= 13) {

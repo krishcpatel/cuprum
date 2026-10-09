@@ -9,13 +9,32 @@ import org.lwjgl.system.SharedLibrary;
 import org.lwjgl.system.libffi.FFICIF;
 import org.lwjgl.system.macosx.ObjCRuntime;
 
-import static org.lwjgl.sdl.SDLVideo.*;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowFlags;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowProperties;
+import static org.lwjgl.sdl.SDLVideo.SDL_PROP_WINDOW_COCOA_WINDOW_POINTER;
+import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_METAL;
 import static org.lwjgl.sdl.SDLProperties.SDL_GetPointerProperty;
-import static org.lwjgl.sdl.SDLMetal.*;
-import static org.lwjgl.system.JNI.*;
-import static org.lwjgl.system.MemoryUtil.*;
-import static org.lwjgl.system.libffi.LibFFI.*;
-import static org.lwjgl.system.macosx.ObjCRuntime.*;
+import static org.lwjgl.sdl.SDLMetal.SDL_Metal_CreateView;
+import static org.lwjgl.sdl.SDLMetal.SDL_Metal_DestroyView;
+import static org.lwjgl.sdl.SDLMetal.SDL_Metal_GetLayer;
+import static org.lwjgl.system.JNI.invokeP;
+import static org.lwjgl.system.JNI.invokePPD;
+import static org.lwjgl.system.JNI.invokePPJ;
+import static org.lwjgl.system.JNI.invokePPP;
+import static org.lwjgl.system.JNI.invokePPV;
+import static org.lwjgl.system.JNI.invokePPZ;
+import static org.lwjgl.system.MemoryUtil.NULL;
+import static org.lwjgl.system.MemoryUtil.memAddress;
+import static org.lwjgl.system.MemoryUtil.memUTF8;
+import static org.lwjgl.system.libffi.LibFFI.FFI_DEFAULT_ABI;
+import static org.lwjgl.system.libffi.LibFFI.FFI_OK;
+import static org.lwjgl.system.libffi.LibFFI.ffi_call;
+import static org.lwjgl.system.libffi.LibFFI.ffi_prep_cif;
+import static org.lwjgl.system.libffi.LibFFI.ffi_type_double;
+import static org.lwjgl.system.libffi.LibFFI.ffi_type_pointer;
+import static org.lwjgl.system.libffi.LibFFI.ffi_type_void;
+import static org.lwjgl.system.macosx.ObjCRuntime.objc_getClass;
+import static org.lwjgl.system.macosx.ObjCRuntime.sel_getUid;
 
 /** Objective-C calls use ABI-correct LWJGL JNI/libffi signatures, without preview FFM. */
 public final class CocoaMetalBridge {
@@ -99,7 +118,7 @@ public final class CocoaMetalBridge {
         }
     }
 
-    // CGFloat is double on ARM64. JNI's float/int signatures cannot be substituted.
+    // CGFloat is double on both supported 64-bit macOS architectures. JNI's float/int signatures cannot be substituted.
     private static void setDouble(long receiver, String selector, double value) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             FFICIF cif = FFICIF.calloc(stack);

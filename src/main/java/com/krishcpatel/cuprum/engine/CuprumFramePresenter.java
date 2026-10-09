@@ -8,9 +8,7 @@ public final class CuprumFramePresenter {
     private CuprumFramePresenter() { }
 
     public static void present(GpuSurface surface) {
-        // Integration seam for the future Metal GpuSurface adapter. In diagnostic
-        // mode this is Minecraft's OpenGL surface. Submission happens before this
-        // hook; never acquire another drawable or submit a second frame here.
+        // Rendering and drawable presentation have been scheduled before encoder submission.
         surface.present();
     }
 }

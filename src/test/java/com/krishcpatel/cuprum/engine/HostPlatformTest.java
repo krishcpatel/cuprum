@@ -13,13 +13,13 @@ class HostPlatformTest {
             "Mac OS X,arm64,15.1,true",
             "macOS,aarch64,26.0,true",
             "Darwin,arm64,26.0,true",
-            "Mac OS X,x86_64,15.1,false",
+            "Mac OS X,x86_64,15.1,true",
             "Mac OS X,aarch64,12.7,false",
             "Mac OS X,aarch64,unknown,false",
             "Windows 11,aarch64,11.0,false",
             "Linux,aarch64,6.12,false"
     })
-    void onlySupportsModernMacsWithAnArmRuntime(String os, String arch, String version, boolean supported) {
+    void onlySupportsModernMacsWithCompatibleRuntime(String os, String arch, String version, boolean supported) {
         assertEquals(supported, HostPlatform.unsupportedReason(os, arch, version).isEmpty());
     }
 }

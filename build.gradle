@@ -29,7 +29,7 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.release = 25
 }
-test { useJUnitPlatform() }
+test { useJUnitPlatform(); jvmArgs '--enable-native-access=ALL-UNNAMED' }
 
 processResources {
     inputs.property 'version', project.version
@@ -41,30 +41,29 @@ processResources {
     }
 }
 
-// Compile a small ARM64 Objective-C JNI bridge linked directly to Apple's frameworks.
+// Compile a universal Objective-C JNI bridge linked directly to Apple's frameworks.
 // Unsupported hosts can compile Java and tests but cannot create a native release jar.
 def nativeOutput = layout.buildDirectory.dir('generated/metal-native')
-def nativeLibrary = nativeOutput.map { it.file('native/macos-arm64/libcuprum_metal.dylib') }
-def buildOnMacArm = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('mac') &&
-        ['aarch64', 'arm64'].contains(System.getProperty('os.arch'))
+def nativeLibrary = nativeOutput.map { it.file('native/macos-universal/libcuprum_metal.dylib') }
+def buildOnMac = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('mac')
 def nativeJdk = javaToolchains.compilerFor { languageVersion = JavaLanguageVersion.of(25) }
 
 tasks.register('compileMetalNative', Exec) {
     group = 'build'
-    description = 'Compiles the direct Metal JNI bridge for macOS 13+ ARM64.'
-    inputs.file('src/main/native/cuprum_metal.m')
+    description = 'Compiles the direct Metal JNI bridge for macOS 13+ ARM64 and x86_64.'
+    inputs.files('src/main/native/cuprum_metal.m', 'src/main/native/cuprum_backend.m')
     inputs.file('build.gradle')
     outputs.file(nativeLibrary)
-    onlyIf { buildOnMacArm }
+    onlyIf { buildOnMac }
     doFirst {
         def jdkHome = nativeJdk.get().metadata.installationPath.asFile
         def output = nativeLibrary.get().asFile
         output.parentFile.mkdirs()
         commandLine 'xcrun', 'clang', '-dynamiclib', '-fobjc-arc', '-fvisibility=hidden',
-                '-Wall', '-Wextra', '-Werror', '-Wl,-install_name,@rpath/libcuprum_metal.dylib', '-arch', 'arm64', '-mmacosx-version-min=13.0',
+                '-Wall', '-Wextra', '-Werror', '-Wl,-install_name,@rpath/libcuprum_metal.dylib', '-arch', 'arm64', '-arch', 'x86_64', '-mmacosx-version-min=13.0',
                 '-I' + new File(jdkHome, 'include'), '-I' + new File(jdkHome, 'include/darwin'),
-                '-framework', 'Foundation', '-framework', 'Metal', '-framework', 'QuartzCore',
-                'src/main/native/cuprum_metal.m', '-o', output.absolutePath
+                '-framework', 'Cocoa', '-framework', 'Foundation', '-framework', 'Metal', '-framework', 'QuartzCore',
+                'src/main/native/cuprum_metal.m', 'src/main/native/cuprum_backend.m', '-o', output.absolutePath
     }
 }
 processResources {
@@ -85,7 +84,7 @@ loom {
 
 tasks.register('nativeSmoke', JavaExec) {
     group = 'verification'
-    description = 'Opens a Metal window, draws and reads back 120 direct Metal frames (macOS ARM64 only).'
+    description = 'Opens a Metal window, draws and reads back 120 direct Metal frames (macOS only).'
     dependsOn classes
     classpath = sourceSets.main.runtimeClasspath
     mainClass = 'com.krishcpatel.cuprum.diagnostic.NativeSmoke'
@@ -96,7 +95,7 @@ tasks.register('nativeSmoke', JavaExec) {
 jar {
     doFirst {
         if (!nativeLibrary.get().asFile.isFile()) {
-            throw new GradleException('A native release jar must be built on macOS ARM64 with Xcode Command Line Tools.')
+            throw new GradleException('A native release jar must be built on macOS with Xcode Command Line Tools.')
         }
     }
     from('LICENSE.txt') { rename { "LICENSE_${project.archives_base_name}.txt" } }
