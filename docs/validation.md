@@ -115,3 +115,6 @@ water effect, particle, dynamic lighting update, post-processing pass, dimension
 shader pack or mod. Several of these paths have shader and GPU integration coverage,
 but comprehensive scene-by-scene comparison, long-duration soak tests and performance
 benchmarks remain necessary before calling this production-ready.
+
+For the deeper library-dependency research and stricter enforcement route, see
+[Making Cuprum exclusively Metal](metal-only.md).
