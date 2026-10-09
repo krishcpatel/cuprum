@@ -62,9 +62,9 @@ final class MetalTransient implements TransientMemory, AutoCloseable {
             MetalBackendNative.release(next.completion);
             next.completion = 0;
         }
-        device.encoder.poll();
         next.page = 0;
         next.offset = 0;
+        device.encoder.poll();
     }
 
     @Override

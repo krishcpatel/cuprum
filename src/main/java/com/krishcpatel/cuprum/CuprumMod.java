@@ -14,11 +14,7 @@ public final class CuprumMod implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        var unsupported = HostPlatform.unsupportedReason();
-        if (unsupported.isPresent()) {
-            LOGGER.error("{} Cuprum initialization has been skipped.", unsupported.get());
-            return;
-        }
+        HostPlatform.requireSupported();
         if (!Boolean.parseBoolean(System.getProperty("cuprum.enabled", "true"))) {
             LOGGER.info("Cuprum is disabled by cuprum.enabled=false.");
             return;
@@ -29,10 +25,11 @@ public final class CuprumMod implements ClientModInitializer {
             LOGGER.info("Direct Metal device: {}; registry ID: 0x{}; unified memory: {}", metal.name(),
                     Long.toUnsignedString(metal.registryId(), 16), metal.unifiedMemory());
             LOGGER.info("Cuprum direct Metal backend loaded; "
-                    + "RenderPearl will select the Metal device unless diagnostic mode is explicitly requested.");
+                    + "RenderPearl will select the native Metal device.");
         } catch (RuntimeException | LinkageError error) {
             LOGGER.error("Cuprum could not initialize its direct Metal bridge. Use macOS 13+, Java 25 for ARM64 or x86_64, "
                     + "and a build containing libcuprum_metal.dylib.", error);
+            throw new IllegalStateException("Cuprum Metal initialization failed", error);
         }
     }
 }

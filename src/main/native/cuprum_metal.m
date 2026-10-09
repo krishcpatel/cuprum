@@ -17,6 +17,7 @@
 @property(nonatomic, strong) id<CAMetalDrawable> drawable;
 @property(nonatomic, strong) id<MTLCommandBuffer> command;
 @property(nonatomic, strong) id<MTLRenderCommandEncoder> encoder;
+@property(nonatomic, strong) dispatch_semaphore_t permits;
 @end
 @implementation CuprumMetalContext
 @end
@@ -77,6 +78,7 @@ JNIEXPORT jlong JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_createRen
             return 0;
         }
         CuprumMetalContext *ctx = [CuprumMetalContext new];
+        ctx.permits = dispatch_semaphore_create(3);
         ctx.device = MTLCreateSystemDefaultDevice();
         if (!ctx.device) {
             stateError(env, @"No Metal device is available.");
@@ -342,12 +344,15 @@ JNIEXPORT jbyteArray JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_fini
         }
         id<MTLCommandBuffer> command = ctx.command;
         [command presentDrawable:ctx.drawable];
-        if (!wait && !readback) {
-            [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
-              if (completed.status == MTLCommandBufferStatusError)
-                  NSLog(@"Cuprum Metal submission failed: %@", completed.error);
-            }];
-        }
+        // Bound submissions even when a drawable is released before GPU completion.
+        // Capture the semaphore, not the context, so shutdown cannot form a retain cycle.
+        dispatch_semaphore_wait(ctx.permits, DISPATCH_TIME_FOREVER);
+        dispatch_semaphore_t permits = ctx.permits;
+        [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+          if (completed.status == MTLCommandBufferStatusError)
+              NSLog(@"Cuprum Metal submission failed: %@", completed.error);
+          dispatch_semaphore_signal(permits);
+        }];
         [command commit];
         ctx.command = nil;
         ctx.drawable = nil;

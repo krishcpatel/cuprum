@@ -52,8 +52,10 @@ sampler slots match the frontend's uniform binding indices. Extra bindings fail
 with a clear error rather than silently aliasing slots.
 
 Translated source and entry points outlive the SPIR-V modules. Native shader
-libraries are cached by source; immutable PSOs are cached per Java pipeline and
-actual depth attachment format. PSOs carry attachment formats, blend equations,
+libraries are cached by source; immutable PSOs and their native binding reflection
+are cached per Java pipeline and actual depth attachment format. Vertex descriptors
+are flattened and checked once during translation. Native depth states and samplers
+are shared through device-owned caches, with independent retained JNI handles. PSOs carry attachment formats, blend equations,
 write masks and depth state. Culling, wireframe and depth bias are set when binding
 the pipeline. Current RenderPearl exposes depth/bias through DepthStencilState;
 it does not expose legacy GlStateManager stencil operations. Packed depth/stencil
@@ -98,8 +100,9 @@ waits for submitted work, completes callbacks and closes owned resources.
 The surface acquires at most one drawable per frame and uses CAMetalLayer's three
 available drawables. A fullscreen pass scales the game's color texture into a
 framebuffer-only BGRA8 drawable. Presentation is scheduled on the same command
-buffer before Minecraft submits it; the later `GpuSurface.present` hook releases
-the surface's acquired reference. A three-permit semaphore bounds in-flight
+buffer before Minecraft submits it; the later `GpuSurface.present` hook closes any remaining Java/native render pass,
+submits pending commands, polls readback completions and releases the surface's
+acquired reference. An already submitted frame does not advance upload arenas twice. A three-permit semaphore bounds in-flight
 command buffers and completion handlers release permits.
 
 Zero-sized or iconified surfaces produce SurfaceException and let Minecraft retry;
@@ -120,7 +123,11 @@ Calibration samples the device GPU clock against Java's monotonic clock.
 small independent MSL rendering diagnostic used by `NativeSmoke`. Both native
 implementations are linked into one universal macOS dylib; neither links Vulkan.
 
-Verification includes the native GPU readback test and a Java encoder test with
+Verification includes compilation of all 192 required and optional registered vanilla
+pipelines through the actual game frontend into native Metal PSOs. This catches
+MSL compile errors across every shader define and reflected vertex layout. It also
+includes offscreen scissor clipping, unfinished-pass finalization and failing
+readback callback cleanup, the native GPU readback test and a Java encoder test with
 12 submissions, asynchronous callbacks and repeated arena rotation. The Fabric
 client loaded vanilla shaders and texture atlases, rendered the title screen and
 entered a single-player world on an M1 Pro under Metal API validation. GPU frame

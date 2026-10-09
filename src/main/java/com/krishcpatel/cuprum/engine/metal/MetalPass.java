@@ -73,6 +73,9 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
     @Override
     public void setUniform(int index, Object value) {
         check();
+        if (pipeline == null) throw new IllegalStateException("Bind a pipeline before uniforms");
+        if (index < 0 || index >= pipeline.info.uniforms().size())
+            throw new IllegalArgumentException("Uniform binding outside pipeline layout: " + index);
         if (value == null) return;
         if (value instanceof TextureViewAndSampler pair) {
             device.requireOwned(pair.view());
@@ -100,7 +103,7 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
     public void setVertexBuffer(int slot, GpuBufferSlice buffer) {
         check();
         if (buffer != null) device.requireOwned(buffer.buffer());
-        if (slot >= 15)
+        if (slot < 0 || slot >= 15)
             throw new IllegalArgumentException("Metal exposes 15 vertex slots after reserving constant bindings");
         MetalBackendNative.bindBuffer(device.handle, slot + 16, buffer == null ? 0 : ((MetalResources.Buffer) buffer.buffer()).handle(), buffer == null ? 0 : buffer.offset());
     }
@@ -201,9 +204,14 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
     public void enableScissor(int x, int y, int w, int h) {
         check();
         var a = descriptor.renderArea();
-        int left = Math.max(x, a.x()), top = Math.max(y, a.y());
-        int right = Math.min(x + w, a.x() + a.width()), bottom = Math.min(y + h, a.y() + a.height());
-        MetalBackendNative.scissor(device.handle, left, top, Math.max(0, right - left), Math.max(0, bottom - top));
+        if (w < 0 || h < 0) throw new IllegalArgumentException("Negative scissor extent");
+        // Metal requires even an empty rect's origin to lie within the attachment.
+        // Use long arithmetic so an offscreen GL-style rectangle cannot overflow.
+        long rightEdge = (long) a.x() + a.width(), bottomEdge = (long) a.y() + a.height();
+        int left = (int) Math.min(Math.max((long) x, a.x()), rightEdge);
+        int top = (int) Math.min(Math.max((long) y, a.y()), bottomEdge);
+        long right = Math.min((long) x + w, rightEdge), bottom = Math.min((long) y + h, bottomEdge);
+        MetalBackendNative.scissor(device.handle, left, top, (int) Math.max(0, right - left), (int) Math.max(0, bottom - top));
     }
 
     @Override

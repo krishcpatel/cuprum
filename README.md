@@ -42,10 +42,15 @@ MTL_DEBUG_LAYER=1 ./gradlew test
 MTL_DEBUG_LAYER=1 ./gradlew nativeSmoke
 ```
 
-Native integration tests verify textured indexed rendering, uniform and texel-buffer
+The shader integration test compiles all **192 registered vanilla pipelines**, including
+terrain, entity, GUI, sky, clouds and post-processing, through Minecraft's GLSL/SPIR-V
+frontend into MSL and actual Metal PSOs. Native integration tests verify textured
+indexed rendering, uniform and texel-buffer
 bindings, blending, depth, scissor, partial clears, GPU triangle-fan expansion, timestamp
-queries inside and outside passes, asynchronous readback, odd texture row strides,
-and repeated upload-arena reuse. Native tests run only on compatible Macs.
+queries inside and outside passes, asynchronous readback, atlas mip uploads,
+independent lightmap/overlay sampler slots, triangle strips, odd texture row strides,
+repeated upload-arena reuse, offscreen scissors, unfinished-pass cleanup and callback
+failure recovery. Native tests run only on compatible Macs.
 `nativeSmoke` additionally opens a Metal window, renders and reads back 120 frames,
 checks resizing and cancellation, and rejects loaded Vulkan/MoltenVK libraries.
 
@@ -59,16 +64,15 @@ compatibility or a benchmarked performance improvement.
 ## Configuration
 
 - `-Dcuprum.backend=metal`: default, renders Minecraft through Metal.
-- `-Dcuprum.backend=diagnostic`: logs Metal hardware information and selects OpenGL.
 - `-Dcuprum.enabled=false`: disables Cuprum's backend hooks.
 - `-Dcuprum.nativeLibrary=/absolute/path/libcuprum_metal.dylib`: development override.
 - `-Dcuprum.captureFrame=/absolute/path/frame.png`: captures the presented image
   orientation after 300 frames. `-Dcuprum.captureFrameNumber=900` changes the frame.
 - `-Dcuprum.dumpShaders=/absolute/path/directory`: writes translated MSL for inspection.
 
-Unsupported operating systems or architectures retain vanilla behavior and log the
-platform requirement. Native initialization failures on supported Macs are surfaced
-as errors. A diagnostic selection must be explicit.
+Unsupported operating systems or architectures fail immediately with a descriptive
+platform error. Native initialization failures also abort startup. Metal is the only
+supported backend; `cuprum.backend=diagnostic` is rejected.
 
 ## License
 

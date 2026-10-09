@@ -59,6 +59,7 @@ final class MetalSurface implements GpuSurfaceBackend {
         if (!acquired) throw new IllegalStateException("No drawable acquired");
         if (encoder != device.encoder) throw new IllegalArgumentException("Foreign command encoder");
         device.requireOwned(view);
+        device.encoder.finishPass();
         MetalBackendNative.blitDrawable(device.handle, ((MetalResources.View) view).handle());
         String capture = System.getProperty("cuprum.captureFrame");
         if (++frames == Integer.getInteger("cuprum.captureFrameNumber", 300) && capture != null) {
@@ -104,6 +105,7 @@ final class MetalSurface implements GpuSurfaceBackend {
     public void present() {
         device.checkThread();
         if (!acquired) throw new IllegalStateException("No drawable acquired");
+        device.encoder.finishFrame();
         MetalBackendNative.present(device.handle);
         acquired = false;
     }

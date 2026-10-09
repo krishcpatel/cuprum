@@ -40,12 +40,29 @@ final class MetalPipeline implements BackendRenderPipeline {
     final MetalDevice device;
     final CreateInfo info;
     final Shader vertex, fragment;
+    // Preserve frontend reflection once; no descriptor reconstruction on every depth variant.
+    private final int[] attributes, layouts;
     private final Map<Integer, Long> variants = new HashMap<>();
     private boolean closed;
 
     MetalPipeline(MetalDevice device, CreateInfo info) {
         this.device = device;
         this.info = info;
+        for (var layout : info.vertexBuffers()) {
+            if (layout.bufferSlot() < 0 || layout.bufferSlot() >= 15 || layout.stride() <= 0 || layout.stepRate() < 0)
+                throw new IllegalArgumentException("Invalid Metal vertex layout in " + info.name());
+        }
+        for (var attribute : info.attribBindings()) {
+            var layout = info.vertexBuffers().stream().filter(b -> b.bufferSlot() == attribute.bufferSlot()).findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException("Attribute has no vertex buffer layout"));
+            if (attribute.location() < 0 || attribute.location() >= 31 || attribute.offset() < 0
+                    || (long) attribute.offset() + attribute.format().blockSize() > layout.stride())
+                throw new IllegalArgumentException("Invalid Metal vertex attribute in " + info.name());
+        }
+        if (info.colorTargetStates().size() > 8)
+            throw new IllegalArgumentException("Metal supports at most eight color targets");
+        attributes = info.attribBindings().stream().flatMapToInt(a -> java.util.stream.IntStream.of(a.bufferSlot(), a.location(), a.offset(), a.format().ordinal())).toArray();
+        layouts = info.vertexBuffers().stream().flatMapToInt(a -> java.util.stream.IntStream.of(a.bufferSlot(), a.stride(), a.stepRate())).toArray();
         vertex = translate(info.shaders().stream().filter(s -> s.module().type() == ShaderType.VERTEX).findFirst().orElseThrow());
         fragment = translate(info.shaders().stream().filter(s -> s.module().type() == ShaderType.FRAGMENT).findFirst().orElseThrow());
     }
@@ -103,8 +120,6 @@ final class MetalPipeline implements BackendRenderPipeline {
         device.checkThread();
         if (closed) throw new IllegalStateException("Pipeline closed");
         return variants.computeIfAbsent(depthFormat, key -> {
-            int[] attrs = info.attribBindings().stream().flatMapToInt(a -> java.util.stream.IntStream.of(a.bufferSlot(), a.location(), a.offset(), a.format().ordinal())).toArray();
-            int[] layouts = info.vertexBuffers().stream().flatMapToInt(a -> java.util.stream.IntStream.of(a.bufferSlot(), a.stride(), a.stepRate())).toArray();
             int[] colors = new int[info.colorTargetStates().size() * 9];
             for (int i = 0; i < info.colorTargetStates().size(); i++) {
                 var c = info.colorTargetStates().get(i);
@@ -127,7 +142,7 @@ final class MetalPipeline implements BackendRenderPipeline {
                 }
             }
             var ds = info.depthStencilState();
-            return MetalBackendNative.pipeline(device.handle, vertex.msl, vertex.entry, fragment.msl, fragment.entry, attrs, layouts, colors, key, ds == null ? 0 : ds.depthTest().ordinal(), ds != null && ds.writeDepth(), info.cull(), info.polygonMode().ordinal() == 1, ds == null ? 0 : ds.depthBiasConstant(), ds == null ? 0 : ds.depthBiasScaleFactor());
+            return MetalBackendNative.pipeline(device.handle, vertex.msl, vertex.entry, fragment.msl, fragment.entry, attributes, layouts, colors, key, ds == null ? 0 : ds.depthTest().ordinal(), ds != null && ds.writeDepth(), info.cull(), info.polygonMode().ordinal() == 1, ds == null ? 0 : ds.depthBiasConstant(), ds == null ? 0 : ds.depthBiasScaleFactor());
         });
     }
 

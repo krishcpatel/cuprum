@@ -46,9 +46,38 @@ final class MetalEncoder implements CommandEncoderBackend, AutoCloseable {
     void poll() {
         while (!completions.isEmpty() && MetalBackendNative.await(completions.peek().command, 0)) {
             var c = completions.remove();
-            c.callbacks.forEach(Runnable::run);
-            MetalBackendNative.release(c.command);
+            try {
+                runCallbacks(c.callbacks);
+            } finally {
+                MetalBackendNative.release(c.command);
+            }
         }
+    }
+
+    // A failing readback must not skip the remaining owners' cleanup callbacks.
+    private static void runCallbacks(List<Runnable> work) {
+        Throwable failure = null;
+        for (Runnable callback : work) {
+            try {
+                callback.run();
+            } catch (RuntimeException | Error error) {
+                if (failure == null) failure = error;
+                else if (failure != error) failure.addSuppressed(error);
+            }
+        }
+        if (failure instanceof RuntimeException error) throw error;
+        if (failure instanceof Error error) throw error;
+    }
+
+    void finishPass() {
+        device.checkThread();
+        if (active != null) submitRenderPass();
+    }
+
+    void finishFrame() {
+        // Finalize both Java pass ownership and the native encoder at the frame boundary.
+        finishPass();
+        submit();
     }
 
     @Override
@@ -56,6 +85,7 @@ final class MetalEncoder implements CommandEncoderBackend, AutoCloseable {
         idlePass();
         poll();
         long command = MetalBackendNative.submit(device.handle, false);
+        if (command == 0 && callbacks.isEmpty()) return;
         if (!callbacks.isEmpty()) {
             completions.add(new Completion(MetalBackendNative.retain(command), List.copyOf(callbacks)));
             callbacks.clear();
@@ -69,8 +99,9 @@ final class MetalEncoder implements CommandEncoderBackend, AutoCloseable {
         transientMemory.rotate(command);
         MetalBackendNative.waitIdle(device.handle);
         poll();
-        callbacks.forEach(Runnable::run);
+        var work = List.copyOf(callbacks);
         callbacks.clear();
+        runCallbacks(work);
     }
 
     @Override

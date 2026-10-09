@@ -16,15 +16,15 @@ import org.lwjgl.sdl.SDLVideo;
  */
 public final class CuprumBackend implements GpuBackend {
     public static boolean enabled() {
-        return Boolean.parseBoolean(System.getProperty("cuprum.enabled", "true"))
-                && HostPlatform.unsupportedReason().isEmpty();
+        HostPlatform.requireSupported();
+        return Boolean.parseBoolean(System.getProperty("cuprum.enabled", "true"));
     }
 
     public static boolean takeoverRequested() {
         String backend = System.getProperty("cuprum.backend", "metal");
         if ("metal".equalsIgnoreCase(backend)) return true;
-        if ("diagnostic".equalsIgnoreCase(backend)) return false;
-        throw new IllegalArgumentException("Unknown cuprum.backend: " + backend + "; use metal or diagnostic");
+
+        throw new IllegalArgumentException("Unknown cuprum.backend: " + backend + "; Cuprum supports only metal");
     }
 
     @Override

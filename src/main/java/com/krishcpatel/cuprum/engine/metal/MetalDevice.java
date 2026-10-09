@@ -170,7 +170,7 @@ public final class MetalDevice implements GpuDeviceBackend, AutoCloseable {
     public void close() {
         checkThread();
         if (handle == 0) return;
-        encoder.sync();
+        encoder.finishFrame();
         encoder.close();
         for (var r : List.copyOf(resources)) r.close();
         MetalBackendNative.closeDevice(handle);

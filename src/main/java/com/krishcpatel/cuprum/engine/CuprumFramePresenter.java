@@ -3,12 +3,12 @@ package com.krishcpatel.cuprum.engine;
 
 import com.mojang.renderpearl.api.device.GpuSurface;
 
-/** Single presentation boundary; the caller already submitted the command encoder. */
+/** Single presentation boundary; MetalSurface finalizes any remaining pass and submission. */
 public final class CuprumFramePresenter {
     private CuprumFramePresenter() { }
 
     public static void present(GpuSurface surface) {
-        // Rendering and drawable presentation have been scheduled before encoder submission.
+        // Surface ownership includes draining any unfinished encoder before releasing the drawable.
         surface.present();
     }
 }

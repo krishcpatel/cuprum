@@ -30,6 +30,8 @@ static void failBackend(JNIEnv *env, NSString *message) {
 @property(strong) dispatch_semaphore_t permits;
 @property(strong) NSMutableDictionary *clearPipelines;
 @property(strong) NSMutableDictionary *libraries;
+@property(strong) NSMutableDictionary *samplers;
+@property(strong) NSMutableDictionary *depthStates;
 @property(strong) id<MTLBuffer> timestampMarker;
 @property(strong) MTLRenderPassDescriptor *renderDescriptor;
 @property(strong) CuprumBackendPipeline *boundPipeline;
@@ -46,6 +48,8 @@ static void failBackend(JNIEnv *env, NSString *message) {
 @interface CuprumBackendPipeline : NSObject
 @property(strong) id<MTLRenderPipelineState> pso;
 @property(strong) id<MTLDepthStencilState> depth;
+// Reflection has the same lifetime as the cached PSO, never the temporary library function.
+@property(strong) MTLRenderPipelineReflection *reflection;
 @property BOOL cull;
 @property BOOL wireframe;
 @property float bias;
@@ -87,6 +91,19 @@ static void suspendRender(CuprumBackendContext *d) {
         [d.render popDebugGroup];
     [d.render endEncoding];
     d.render = nil;
+}
+// Pass replay state is needed only while a pass is suspended. Encoded Metal
+// commands retain their own resources; dropping these references at endPass lets
+// closed Java textures/buffers be freed as soon as their GPU work completes.
+static void finishRender(CuprumBackendContext *d) {
+    if (d.render)
+        suspendRender(d);
+    d.renderDescriptor = nil;
+    d.boundPipeline = nil;
+    d.boundBuffers = nil;
+    d.boundTextures = nil;
+    d.boundSamplers = nil;
+    d.debugGroups = nil;
 }
 static void resumeRender(CuprumBackendContext *d) {
     MTLRenderPassDescriptor *p = [d.renderDescriptor copy];
@@ -444,6 +461,13 @@ JNIEXPORT jlong JNICALL JNI_METHOD(sampler)(JNIEnv *e, jclass t, jlong h, jint u
                                             jint aniso, jdouble lod) {
     (void)t;
     @autoreleasepool {
+        CuprumBackendContext *d = ctx(h);
+        NSString *key = [NSString stringWithFormat:@"%d/%d/%d/%d/%d/%.17g", u, v, min, mag, aniso, lod];
+        if (!d.samplers)
+            d.samplers = [NSMutableDictionary new];
+        id<MTLSamplerState> cached = d.samplers[key];
+        if (cached)
+            return keep(cached); // Each Java sampler retains an independent ownership reference.
         MTLSamplerDescriptor *s = [MTLSamplerDescriptor new];
         s.sAddressMode = u ? MTLSamplerAddressModeClampToEdge : MTLSamplerAddressModeRepeat;
         s.tAddressMode = v ? MTLSamplerAddressModeClampToEdge : MTLSamplerAddressModeRepeat;
@@ -458,6 +482,7 @@ JNIEXPORT jlong JNICALL JNI_METHOD(sampler)(JNIEnv *e, jclass t, jlong h, jint u
             failBackend(e, @"Metal sampler allocation failed.");
             return 0;
         }
+        d.samplers[key] = state;
         return keep(state);
     }
 }
@@ -551,15 +576,28 @@ JNIEXPORT jlong JNICALL JNI_METHOD(pipeline)(JNIEnv *e, jclass t, jlong h, jstri
                 p.stencilAttachmentPixelFormat = pixelFormat(depthFormat);
         }
         CuprumBackendPipeline *r = [CuprumBackendPipeline new];
-        r.pso = [d.device newRenderPipelineStateWithDescriptor:p error:&error];
+        MTLRenderPipelineReflection *reflection = nil;
+        r.pso = [d.device newRenderPipelineStateWithDescriptor:p
+                                                    options:MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo
+                                                 reflection:&reflection error:&error];
+        r.reflection = reflection;
         if (!r.pso) {
             failBackend(e, [@"Metal PSO: " stringByAppendingString:error.localizedDescription ?: @"unknown"]);
             return 0;
         }
-        MTLDepthStencilDescriptor *ds = [MTLDepthStencilDescriptor new];
-        ds.depthCompareFunction = compare(depthCompare);
-        ds.depthWriteEnabled = write;
-        r.depth = [d.device newDepthStencilStateWithDescriptor:ds];
+        // Depth testing disabled maps to ALWAYS with writes disabled, as supplied by
+        // RenderPearl. Cache immutable depth state separately from shader/format PSOs.
+        if (!d.depthStates)
+            d.depthStates = [NSMutableDictionary new];
+        NSNumber *depthKey = @((depthCompare << 1) | (write ? 1 : 0));
+        r.depth = d.depthStates[depthKey];
+        if (!r.depth) {
+            MTLDepthStencilDescriptor *ds = [MTLDepthStencilDescriptor new];
+            ds.depthCompareFunction = compare(depthCompare);
+            ds.depthWriteEnabled = write;
+            r.depth = [d.device newDepthStencilStateWithDescriptor:ds];
+            d.depthStates[depthKey] = r.depth;
+        }
         r.cull = cull;
         r.wireframe = wire;
         r.bias = bias;
@@ -632,8 +670,7 @@ JNIEXPORT void JNICALL JNI_METHOD(endPass)(JNIEnv *e, jclass t, jlong h) {
         (void)e;
         (void)t;
         CuprumBackendContext *d = ctx(h);
-        [d.render endEncoding];
-        d.render = nil;
+        finishRender(d);
     }
 }
 JNIEXPORT void JNICALL JNI_METHOD(bindPipeline)(JNIEnv *e, jclass t, jlong h, jlong p) {
@@ -795,10 +832,8 @@ JNIEXPORT void JNICALL JNI_METHOD(copyTexture)(JNIEnv *e, jclass t, jlong h, jlo
 }
 static id<MTLCommandBuffer> submitBackend(CuprumBackendContext *d, BOOL wait) {
     endBlit(d);
-    if (d.render) {
-        [d.render endEncoding];
-        d.render = nil;
-    }
+    if (d.render)
+        finishRender(d);
     if (!d.command)
         return nil;
     id<MTLCommandBuffer> c = d.command;
