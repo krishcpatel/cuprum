@@ -1,0 +1,12 @@
+[23:30:27] [main/INFO]: PASS: SDL/Cocoa CAMetalLayer attached to VK_EXT_metal_surface.
+[23:30:27] [main/WARN]: Device [Apple M1 Pro] supports all extensions from FeatureSet [Vulkan Portability Subset], making required
+[23:30:27] [main/INFO]: Enabling required for device FeatureSet [Vulkan Portability Subset]
+[23:30:27] [main/INFO]: Optional FeatureSet [EXT MultiDraw] not supported
+[23:30:27] [main/INFO]: Enabling optional FeatureSet [Calibrated Timestamps]
+[23:30:27] [main/INFO]: Optional FeatureSet [AMD Buffer Marker] not supported
+[23:30:27] [main/INFO]: Enabling optional FeatureSet [Wireframe]
+[23:30:27] [main/INFO]: Optional FeatureSet [NV Diagnostic Checkpoint] not supported
+[23:30:27] [main/INFO]: Cuprum selected Minecraft 26.3's Vulkan backend: DeviceInfo[name=Apple M1 Pro, vendorName=APPLE, driverInfo=1.2.350 MoltenVK 1.4.2, isZZeroToOne=true, backendName=Vulkan, timestampPeriod=1.0, limits=DeviceLimits[maxAnisotropy=16, minUniformOffsetAlignment=16, maxTextureSize=16384, maxMemoryAllocationSize=9534832640, maxMultiDrawDirectInterleavedDrawCount=0, maxColorAttachments=8, maxDrawIndirectDrawCount=1073741824], features=DeviceFeatures[wireframeFillMode=true, shaderDrawParameters=true, multiDrawDirectInterleaved=false, multiDrawDirectSeparate=false, multiDrawIndirect=true, drawIndirect=true, nonZeroFirstInstance=true, persistentMapping=true], underlyingExtensions=[VK_EXT_calibrated_timestamps (D), VK_KHR_portability_subset (D), VK_KHR_synchronization2 (D), VK_EXT_metal_surface (I), VK_EXT_vertex_attribute_divisor (D), VK_KHR_swapchain (D), VK_KHR_surface (I), VK_KHR_push_descriptor (D), VK_EXT_debug_utils (I), VK_KHR_dynamic_rendering (D)], hintsAndWorkarounds=HintsAndWorkarounds[writeToBufferIsSlow=false, anisotropyHasKnownIssues=false, isExplicitDepthRequired=true, multiDrawIndirectHasKnownIssues=false], type=INTEGRATED]
+[23:30:27] [main/INFO]: Metal diagnostics: DeviceInfo[name=Apple M1 Pro, registryId=4294969706, unifiedMemory=true]
+[23:30:27] [main/INFO]: Cocoa diagnostics: WindowInfo[nsWindow=48168553600, contentView=48168558080, scale=1.0]
+[23:30:28] [main/INFO]: PASS: presented 120 frames through RenderPearl → Vulkan → MoltenVK → Metal.

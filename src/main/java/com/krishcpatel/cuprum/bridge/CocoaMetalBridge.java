@@ -1,0 +1,144 @@
+// SPDX-License-Identifier: LGPL-3.0-only
+package com.krishcpatel.cuprum.bridge;
+
+import com.krishcpatel.cuprum.engine.HostPlatform;
+
+import org.lwjgl.system.Library;
+import org.lwjgl.system.MemoryStack;
+import org.lwjgl.system.SharedLibrary;
+import org.lwjgl.system.libffi.FFICIF;
+import org.lwjgl.system.macosx.ObjCRuntime;
+
+import static org.lwjgl.sdl.SDLVideo.*;
+import static org.lwjgl.sdl.SDLProperties.SDL_GetPointerProperty;
+import static org.lwjgl.sdl.SDLMetal.*;
+import static org.lwjgl.system.JNI.*;
+import static org.lwjgl.system.MemoryUtil.*;
+import static org.lwjgl.system.libffi.LibFFI.*;
+import static org.lwjgl.system.macosx.ObjCRuntime.*;
+
+/** Objective-C calls use ABI-correct LWJGL JNI/libffi signatures, without preview FFM. */
+public final class CocoaMetalBridge {
+    private CocoaMetalBridge() { }
+
+    // Frameworks remain loaded for the process lifetime, as do their registered ObjC classes.
+    private static final class Native {
+        static final SharedLibrary QUARTZ = Library.loadNative(CocoaMetalBridge.class, "org.lwjgl",
+                "/System/Library/Frameworks/QuartzCore.framework/QuartzCore");
+        static final SharedLibrary METAL = Library.loadNative(CocoaMetalBridge.class, "org.lwjgl",
+                "/System/Library/Frameworks/Metal.framework/Metal");
+        static final long SEND = ObjCRuntime.getLibrary().getFunctionAddress("objc_msgSend");
+    }
+
+    public record DeviceInfo(String name, long registryId, boolean unifiedMemory) { }
+
+    public static DeviceInfo deviceInfo() {
+        HostPlatform.requireSupported();
+        long pool = message(message(objc_getClass("NSAutoreleasePool"), "alloc"), "init");
+        long device = invokeP(Native.METAL.getFunctionAddress("MTLCreateSystemDefaultDevice"));
+        try {
+            requirePointer(device, "Metal device");
+            return new DeviceInfo(memUTF8(message(message(device, "name"), "UTF8String")),
+                    invokePPJ(device, sel_getUid("registryID"), Native.SEND),
+                    invokePPZ(device, sel_getUid("hasUnifiedMemory"), Native.SEND));
+        } finally {
+            if (device != NULL) sendVoid(device, "release");
+            sendVoid(pool, "drain");
+        }
+    }
+
+    public record WindowInfo(long nsWindow, long contentView, double scale) { }
+
+    /** SDL_Window* is not a GLFWwindow*. Minecraft 26.3 uses SDL3 exclusively. */
+    public static WindowInfo windowInfo(long sdlWindow) {
+        HostPlatform.requireSupported();
+        requireMainThread();
+        long window = requirePointer(SDL_GetPointerProperty(SDL_GetWindowProperties(sdlWindow),
+                SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL), "NSWindow");
+        return new WindowInfo(window, requirePointer(message(window, "contentView"), "NSView"),
+                invokePPD(window, sel_getUid("backingScaleFactor"), Native.SEND));
+    }
+
+    /**
+     * Attach only to a window created for Metal, before creating its renderer.
+     * SDL creates the layer-hosting NSView and CAMetalLayer and tracks resizes.
+     * The caller must not attach a second view to the same surface.
+     */
+    public static Attachment attach(long sdlWindow) {
+        WindowInfo info = windowInfo(sdlWindow);
+        if ((SDL_GetWindowFlags(sdlWindow) & SDL_WINDOW_METAL) == 0) {
+            throw new IllegalArgumentException("Attach CAMetalLayer only to SDL_WINDOW_METAL windows.");
+        }
+        long view = requirePointer(SDL_Metal_CreateView(sdlWindow), "SDL Metal view");
+        try {
+            long layer = requirePointer(SDL_Metal_GetLayer(view), "CAMetalLayer");
+            setDouble(layer, "setContentsScale:", info.scale());
+            return new Attachment(sdlWindow, view, layer);
+        } catch (RuntimeException | Error error) {
+            SDL_Metal_DestroyView(view);
+            throw error;
+        }
+    }
+
+    private static long message(long receiver, String selector) {
+        return invokePPP(receiver, sel_getUid(selector), Native.SEND);
+    }
+
+    private static void sendVoid(long receiver, String selector) {
+        invokePPV(receiver, sel_getUid(selector), Native.SEND);
+    }
+
+    private static long requirePointer(long pointer, String name) {
+        if (pointer == NULL) throw new IllegalStateException("Unable to obtain " + name + ".");
+        return pointer;
+    }
+
+    public static void requireMainThread() {
+        if (!invokePPZ(objc_getClass("NSThread"), sel_getUid("isMainThread"), Native.SEND)) {
+            throw new IllegalStateException("Cocoa window operations require the main thread; launch with -XstartOnFirstThread.");
+        }
+    }
+
+    // CGFloat is double on ARM64. JNI's float/int signatures cannot be substituted.
+    private static void setDouble(long receiver, String selector, double value) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            FFICIF cif = FFICIF.calloc(stack);
+            int result = ffi_prep_cif(cif, FFI_DEFAULT_ABI, ffi_type_void,
+                    stack.pointers(ffi_type_pointer.address(), ffi_type_pointer.address(), ffi_type_double.address()));
+            if (result != FFI_OK) throw new IllegalStateException("Cannot prepare Objective-C CGFloat call: " + result);
+            ffi_call(cif, Native.SEND, null, stack.pointers(
+                    memAddress(stack.pointers(receiver)), memAddress(stack.pointers(sel_getUid(selector))),
+                    memAddress(stack.doubles(value))));
+        }
+    }
+
+    /** Drain and close the Metal renderer before closing this attachment. */
+    public static final class Attachment implements AutoCloseable {
+        private final long window;
+        private final long view;
+        private long layer;
+
+        private Attachment(long window, long view, long layer) {
+            this.window = window;
+            this.view = view;
+            this.layer = layer;
+        }
+
+        public long layer() {
+            if (layer == NULL) throw new IllegalStateException("Metal layer attachment is closed.");
+            return layer;
+        }
+
+        public void updateScale() {
+            setDouble(layer(), "setContentsScale:", windowInfo(window).scale());
+        }
+
+        @Override
+        public void close() {
+            if (layer == NULL) return;
+            requireMainThread();
+            SDL_Metal_DestroyView(view);
+            layer = NULL;
+        }
+    }
+}

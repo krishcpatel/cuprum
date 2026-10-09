@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "cuprum",
+  "version": "${version}",
+  "name": "Cuprum",
+  "description": "Experimental direct Apple Metal renderer foundation for Minecraft 26.3 on Apple Silicon.",
+  "authors": ["Krish C. Patel"],
+  "contact": {},
+  "license": "LGPL-3.0-only",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["com.krishcpatel.cuprum.CuprumMod"]
+  },
+  "mixins": ["cuprum.mixins.json"],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "minecraft": "=${minecraft_version}",
+    "java": ">=25"
+  },
+  "breaks": {
+    "vulkanmod": "*"
+  }
+}

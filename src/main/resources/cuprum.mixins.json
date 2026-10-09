@@ -1,0 +1,8 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.krishcpatel.cuprum.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "client": ["NativeLibrariesBootstrapMixin", "BackendSelectionMixin", "WindowMixin", "RenderSystemMixin", "FramePresentMixin"],
+  "injectors": { "defaultRequire": 1 }
+}

@@ -1,0 +1,113 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+    id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+base { archivesName = project.archives_base_name }
+
+repositories { mavenCentral() }
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${loader_version}"
+
+    // SDL3 and LWJGL core are supplied by Minecraft. Cuprum does not use Vulkan.
+    implementation "org.lwjgl:lwjgl:${lwjgl_version}"
+
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(25)
+    withSourcesJar()
+}
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 25
+}
+test { useJUnitPlatform() }
+
+processResources {
+    inputs.property 'version', project.version
+    inputs.property 'minecraft_version', project.minecraft_version
+    inputs.property 'loader_version', project.loader_version
+    filesMatching('fabric.mod.json') {
+        expand version: project.version, minecraft_version: project.minecraft_version,
+                loader_version: project.loader_version
+    }
+}
+
+// Compile a small ARM64 Objective-C JNI bridge linked directly to Apple's frameworks.
+// Unsupported hosts can compile Java and tests but cannot create a native release jar.
+def nativeOutput = layout.buildDirectory.dir('generated/metal-native')
+def nativeLibrary = nativeOutput.map { it.file('native/macos-arm64/libcuprum_metal.dylib') }
+def buildOnMacArm = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('mac') &&
+        ['aarch64', 'arm64'].contains(System.getProperty('os.arch'))
+def nativeJdk = javaToolchains.compilerFor { languageVersion = JavaLanguageVersion.of(25) }
+
+tasks.register('compileMetalNative', Exec) {
+    group = 'build'
+    description = 'Compiles the direct Metal JNI bridge for macOS 13+ ARM64.'
+    inputs.file('src/main/native/cuprum_metal.m')
+    inputs.file('build.gradle')
+    outputs.file(nativeLibrary)
+    onlyIf { buildOnMacArm }
+    doFirst {
+        def jdkHome = nativeJdk.get().metadata.installationPath.asFile
+        def output = nativeLibrary.get().asFile
+        output.parentFile.mkdirs()
+        commandLine 'xcrun', 'clang', '-dynamiclib', '-fobjc-arc', '-fvisibility=hidden',
+                '-Wall', '-Wextra', '-Werror', '-Wl,-install_name,@rpath/libcuprum_metal.dylib', '-arch', 'arm64', '-mmacosx-version-min=13.0',
+                '-I' + new File(jdkHome, 'include'), '-I' + new File(jdkHome, 'include/darwin'),
+                '-framework', 'Foundation', '-framework', 'Metal', '-framework', 'QuartzCore',
+                'src/main/native/cuprum_metal.m', '-o', output.absolutePath
+    }
+}
+processResources {
+    dependsOn 'compileMetalNative'
+    from(nativeOutput)
+}
+// The LGPL native bridge's source is included in the sources artifact.
+sourcesJar { from('src/main/native') { into 'native-source' } }
+
+loom {
+    runs {
+        client {
+            vmArg '-XstartOnFirstThread'
+            vmArg '--enable-native-access=ALL-UNNAMED'
+        }
+    }
+}
+
+tasks.register('nativeSmoke', JavaExec) {
+    group = 'verification'
+    description = 'Opens a Metal window, draws and reads back 120 direct Metal frames (macOS ARM64 only).'
+    dependsOn classes
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.krishcpatel.cuprum.diagnostic.NativeSmoke'
+    jvmArgs '-XstartOnFirstThread', '--enable-native-access=ALL-UNNAMED'
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+}
+
+jar {
+    doFirst {
+        if (!nativeLibrary.get().asFile.isFile()) {
+            throw new GradleException('A native release jar must be built on macOS ARM64 with Xcode Command Line Tools.')
+        }
+    }
+    from('LICENSE.txt') { rename { "LICENSE_${project.archives_base_name}.txt" } }
+    from('NOTICE.md')
+    from('COPYING')
+}
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            artifactId = project.archives_base_name
+            from components.java
+        }
+    }
+}
