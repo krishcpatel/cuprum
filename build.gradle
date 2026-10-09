@@ -29,7 +29,17 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.release = 25
 }
-test { useJUnitPlatform(); jvmArgs '--enable-native-access=ALL-UNNAMED' }
+tasks.withType(JavaExec).configureEach {
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+}
+test {
+    useJUnitPlatform()
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+}
+tasks.withType(JavaCompile).configureEach {
+    options.headerOutputDirectory = layout.buildDirectory.dir('generated/jni')
+}
 
 processResources {
     inputs.property 'version', project.version
@@ -50,8 +60,10 @@ def nativeJdk = javaToolchains.compilerFor { languageVersion = JavaLanguageVersi
 
 tasks.register('compileMetalNative', Exec) {
     group = 'build'
-    description = 'Compiles the direct Metal JNI bridge for macOS 13+ ARM64 and x86_64.'
-    inputs.files('src/main/native/cuprum_metal.m', 'src/main/native/cuprum_backend.m')
+    description = 'Compiles the direct Metal JNI bridge for macOS 11+ ARM64 and x86_64.'
+    dependsOn compileJava
+    inputs.files(fileTree('src/main/native'))
+    inputs.dir(layout.buildDirectory.dir('generated/jni'))
     inputs.file('build.gradle')
     outputs.file(nativeLibrary)
     onlyIf { buildOnMac }
@@ -59,11 +71,12 @@ tasks.register('compileMetalNative', Exec) {
         def jdkHome = nativeJdk.get().metadata.installationPath.asFile
         def output = nativeLibrary.get().asFile
         output.parentFile.mkdirs()
-        commandLine 'xcrun', 'clang', '-dynamiclib', '-fobjc-arc', '-fvisibility=hidden',
-                '-Wall', '-Wextra', '-Werror', '-Wl,-install_name,@rpath/libcuprum_metal.dylib', '-arch', 'arm64', '-arch', 'x86_64', '-mmacosx-version-min=13.0',
+        commandLine 'xcrun', 'clang', '-dynamiclib', '-O3', '-fobjc-arc', '-fvisibility=hidden',
+                '-Wall', '-Wextra', '-Werror', '-Wl,-install_name,@rpath/libcuprum_metal.dylib', '-arch', 'arm64', '-arch', 'x86_64', '-mmacosx-version-min=11.0',
                 '-I' + new File(jdkHome, 'include'), '-I' + new File(jdkHome, 'include/darwin'),
+                '-I' + layout.buildDirectory.dir('generated/jni').get().asFile,
                 '-framework', 'Cocoa', '-framework', 'Foundation', '-framework', 'Metal', '-framework', 'QuartzCore',
-                'src/main/native/cuprum_metal.m', 'src/main/native/cuprum_backend.m', '-o', output.absolutePath
+                'src/main/native/cuprum_handles.m', 'src/main/native/cuprum_metal.m', 'src/main/native/cuprum_backend.m', '-o', output.absolutePath
     }
 }
 processResources {

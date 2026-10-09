@@ -11,6 +11,7 @@ import org.lwjgl.system.macosx.ObjCRuntime;
 
 import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowFlags;
 import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowProperties;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowSizeInPixels;
 import static org.lwjgl.sdl.SDLVideo.SDL_PROP_WINDOW_COCOA_WINDOW_POINTER;
 import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_METAL;
 import static org.lwjgl.sdl.SDLProperties.SDL_GetPointerProperty;
@@ -67,6 +68,7 @@ public final class CocoaMetalBridge {
     }
 
     public record WindowInfo(long nsWindow, long contentView, double scale) { }
+    public record PixelExtent(int width, int height, double scale) { }
 
     /** SDL_Window* is not a GLFWwindow*. Minecraft 26.3 uses SDL3 exclusively. */
     public static WindowInfo windowInfo(long sdlWindow) {
@@ -92,7 +94,8 @@ public final class CocoaMetalBridge {
         try {
             long layer = requirePointer(SDL_Metal_GetLayer(view), "CAMetalLayer");
             setDouble(layer, "setContentsScale:", info.scale());
-            return new Attachment(sdlWindow, view, layer);
+            MetalNative.load();
+            return new Attachment(sdlWindow, view, layer, MetalNative.registerLayer(layer));
         } catch (RuntimeException | Error error) {
             SDL_Metal_DestroyView(view);
             throw error;
@@ -136,26 +139,43 @@ public final class CocoaMetalBridge {
         private final long window;
         private final long view;
         private long layer;
+        private long nativeLayer;
 
-        private Attachment(long window, long view, long layer) {
+        private Attachment(long window, long view, long layer, long nativeLayer) {
             this.window = window;
             this.view = view;
             this.layer = layer;
+            this.nativeLayer = nativeLayer;
         }
 
         public long layer() {
             if (layer == NULL) throw new IllegalStateException("Metal layer attachment is closed.");
-            return layer;
+            return nativeLayer;
         }
 
         public void updateScale() {
-            setDouble(layer(), "setContentsScale:", windowInfo(window).scale());
+            if (layer == NULL) throw new IllegalStateException("Metal layer attachment is closed.");
+            setDouble(layer, "setContentsScale:", windowInfo(window).scale());
+        }
+
+        public PixelExtent pixelExtent() {
+            if (layer == NULL) throw new IllegalStateException("Metal layer attachment is closed.");
+            double scale = windowInfo(window).scale();
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                var width = stack.mallocInt(1);
+                var height = stack.mallocInt(1);
+                if (!SDL_GetWindowSizeInPixels(window, width, height))
+                    throw new IllegalStateException("SDL could not query the Metal window pixel extent");
+                return new PixelExtent(width.get(0), height.get(0), scale);
+            }
         }
 
         @Override
         public void close() {
             if (layer == NULL) return;
             requireMainThread();
+            MetalNative.releaseResource(nativeLayer);
+            nativeLayer = NULL;
             SDL_Metal_DestroyView(view);
             layer = NULL;
         }

@@ -27,7 +27,7 @@ public final class CuprumMod implements ClientModInitializer {
             LOGGER.info("Cuprum direct Metal backend loaded; "
                     + "RenderPearl will select the native Metal device.");
         } catch (RuntimeException | LinkageError error) {
-            LOGGER.error("Cuprum could not initialize its direct Metal bridge. Use macOS 13+, Java 25 for ARM64 or x86_64, "
+            LOGGER.error("Cuprum could not initialize its direct Metal bridge. Use macOS 11+, Java 25 for ARM64 or x86_64, "
                     + "and a build containing libcuprum_metal.dylib.", error);
             throw new IllegalStateException("Cuprum Metal initialization failed", error);
         }

@@ -39,6 +39,8 @@ public final class MetalNative {
     }
 
     public static native String[] loadedImagePaths();
+    // The only borrowed Objective-C pointer import, called immediately after SDL_Metal_GetLayer.
+    static native long registerLayer(long sdlMetalLayer);
     public static native long createRenderer(long metalLayer, String mslSource);
     public static native long createBuffer(long renderer, ByteBuffer bytes);
     public static native long createTexture(long renderer, int width, int height, ByteBuffer rgba);

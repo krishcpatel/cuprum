@@ -18,6 +18,7 @@ final class MetalSurface implements GpuSurfaceBackend {
     final BooleanSupplier iconified;
     final CocoaMetalBridge.Attachment layer;
     private int frames;
+    private double configuredScale;
     GpuSurface.Configuration config;
     boolean acquired;
     boolean closed;
@@ -35,18 +36,25 @@ final class MetalSurface implements GpuSurfaceBackend {
         if (closed) throw new SurfaceException("Metal surface is closed");
         if (acquired) throw new SurfaceException("Cannot configure an acquired Metal drawable");
         if (config.width() <= 0 || config.height() <= 0) throw new SurfaceException("Zero drawable extent");
+        if (!supportedPresentModes().contains(config.presentMode())) throw new SurfaceException("Unsupported Metal present mode");
         this.config = config;
+        configuredScale = layer.pixelExtent().scale();
     }
 
     @Override
     public boolean isSuboptimal() {
-        return false;
+        device.checkThread();
+        if (closed || config == null) return true;
+        var extent = layer.pixelExtent();
+        return config.width() != extent.width() || config.height() != extent.height() || configuredScale != extent.scale();
     }
 
     @Override
     public void acquireNextTexture() throws SurfaceException {
         device.checkThread();
         if (closed || acquired || config == null) throw new SurfaceException("Invalid Metal acquisition lifecycle");
+        if (iconified.getAsBoolean()) throw new SurfaceException("Metal window is minimized");
+        if (isSuboptimal()) throw new SurfaceException("Metal window size or backing scale changed; reconfigure the surface");
         layer.updateScale();
         if (iconified.getAsBoolean() || MetalBackendNative.acquire(device.handle, layer.layer(), config.width(), config.height(), config.presentMode() == GpuSurface.PresentMode.FIFO) == 0)
             throw new SurfaceException("Metal drawable is unavailable");
@@ -85,15 +93,7 @@ final class MetalSurface implements GpuSurfaceBackend {
             long command = MetalBackendNative.submit(device.handle, true);
             MetalBackendNative.release(command);
             var bytes = MetalBackendNative.mapBuffer(buffer, 0, stride * height);
-            var image = new java.awt.image.BufferedImage(width, height, java.awt.image.BufferedImage.TYPE_INT_ARGB);
-            for (int y = 0; y < height; y++)
-                for (int x = 0; x < width; x++) {
-                    int offset = y * stride + x * 4;
-                    image.setRGB(x, flip ? height - 1 - y : y, ((bytes.get(offset + 3) & 255) << 24)
-                            | ((bytes.get(offset) & 255) << 16) | ((bytes.get(offset + 1) & 255) << 8)
-                            | (bytes.get(offset + 2) & 255));
-                }
-            javax.imageio.ImageIO.write(image, "png", new java.io.File(path));
+            com.krishcpatel.cuprum.diagnostic.PngWriter.write(java.nio.file.Path.of(path), bytes, width, height, stride, flip);
         } catch (java.io.IOException error) {
             throw new IllegalStateException("Unable to save Metal validation frame", error);
         } finally {
@@ -105,9 +105,19 @@ final class MetalSurface implements GpuSurfaceBackend {
     public void present() {
         device.checkThread();
         if (!acquired) throw new IllegalStateException("No drawable acquired");
-        device.encoder.finishFrame();
-        MetalBackendNative.present(device.handle);
-        acquired = false;
+        try {
+            device.encoder.finishFrame();
+            MetalBackendNative.present(device.handle);
+        } catch (RuntimeException | Error failure) {
+            try {
+                device.encoder.abortFrame();
+            } catch (RuntimeException | Error cleanup) {
+                failure.addSuppressed(cleanup);
+            }
+            throw failure;
+        } finally {
+            acquired = false;
+        }
     }
 
     @Override
@@ -117,12 +127,15 @@ final class MetalSurface implements GpuSurfaceBackend {
 
     @Override
     public void close() {
-        device.checkThread();
         if (closed) return;
-        if (acquired) present();
-        device.encoder.sync();
-        layer.close();
-        closed = true;
-        device.resources.remove(this);
+        device.checkThread();
+        try {
+            if (acquired) present();
+            device.encoder.sync();
+        } finally {
+            layer.close();
+            closed = true;
+            device.resources.remove(this);
+        }
     }
 }

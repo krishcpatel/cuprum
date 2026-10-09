@@ -65,6 +65,17 @@ final class MetalPipeline implements BackendRenderPipeline {
         layouts = info.vertexBuffers().stream().flatMapToInt(a -> java.util.stream.IntStream.of(a.bufferSlot(), a.stride(), a.stepRate())).toArray();
         vertex = translate(info.shaders().stream().filter(s -> s.module().type() == ShaderType.VERTEX).findFirst().orElseThrow());
         fragment = translate(info.shaders().stream().filter(s -> s.module().type() == ShaderType.FRAGMENT).findFirst().orElseThrow());
+        // Preparation runs on RenderPearl's compiler executor, before finishCompile exposes the pipeline.
+        try {
+            for (int format : MetalBackendNative.depthFormats(device.handle)) {
+                if (format == -1 && fragment.msl.contains("[[depth")) continue;
+                prepareVariant(format);
+            }
+        } catch (RuntimeException | Error failure) {
+            variants.values().forEach(MetalBackendNative::release);
+            variants.clear();
+            throw failure;
+        }
     }
 
     private Shader translate(CreateInfo.Shader shader) {
@@ -80,7 +91,7 @@ final class MetalPipeline implements BackendRenderPipeline {
                 long compiler = p.get(0);
                 check(context, spvc_compiler_create_compiler_options(compiler, p));
                 long options = p.get(0);
-                check(context, spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_VERSION, 20400));
+                check(context, spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_VERSION, device.mslVersion));
                 check(context, spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_TEXTURE_BUFFER_NATIVE, true));
                 check(context, spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_FLIP_VERTEX_Y, true));
                 check(context, spvc_compiler_install_compiler_options(compiler, options));
@@ -119,7 +130,13 @@ final class MetalPipeline implements BackendRenderPipeline {
     long variant(int depthFormat) {
         device.checkThread();
         if (closed) throw new IllegalStateException("Pipeline closed");
-        return variants.computeIfAbsent(depthFormat, key -> {
+        Long state = variants.get(depthFormat);
+        if (state == null) throw new IllegalArgumentException("Unsupported/unprepared depth attachment format: " + depthFormat);
+        return state;
+    }
+
+    private void prepareVariant(int depthFormat) {
+        variants.computeIfAbsent(depthFormat, key -> {
             int[] colors = new int[info.colorTargetStates().size() * 9];
             for (int i = 0; i < info.colorTargetStates().size(); i++) {
                 var c = info.colorTargetStates().get(i);

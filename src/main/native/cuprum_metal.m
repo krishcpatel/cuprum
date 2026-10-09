@@ -3,6 +3,9 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <jni.h>
+#import "cuprum_handles.h"
+#include "com_krishcpatel_cuprum_bridge_MetalNative.h"
+#include <math.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
 #include <stdint.h>
@@ -48,9 +51,9 @@ static CuprumMetalContext *context(JNIEnv *env, jlong handle) {
         stateError(env, @"Metal renderer is closed.");
         return nil;
     }
-    return (__bridge CuprumMetalContext *)(void *)(intptr_t)handle;
+    return CuprumGet(env, handle, @"renderer", 0, NO);
 }
-static jlong retainHandle(id object) { return (jlong)(intptr_t)(__bridge_retained void *)object; }
+
 static const void *directBytes(JNIEnv *env, jobject buffer, jlong *size) {
     if (!buffer) {
         argumentError(env, @"Direct buffer data is required.");
@@ -84,7 +87,8 @@ JNIEXPORT jlong JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_createRen
             stateError(env, @"No Metal device is available.");
             return 0;
         }
-        ctx.layer = (__bridge CAMetalLayer *)(void *)(intptr_t)layerHandle;
+        ctx.layer = CuprumGet(env, layerHandle, @"layer", 0, NO);
+        if (!ctx.layer) return 0;
         ctx.layer.device = ctx.device;
         ctx.layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         ctx.layer.framebufferOnly = NO; // Allow the diagnostic GPU readback/blit path.
@@ -104,7 +108,7 @@ JNIEXPORT jlong JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_createRen
         NSString *msl = [NSString stringWithUTF8String:utf8];
         (*env)->ReleaseStringUTFChars(env, source, utf8);
         MTLCompileOptions *options = [MTLCompileOptions new];
-        options.languageVersion = MTLLanguageVersion2_4;
+        options.languageVersion = CuprumLanguageVersion();
         NSError *error = nil;
         id<MTLLibrary> library = [ctx.device newLibraryWithSource:msl options:options error:&error];
         if (!library) {
@@ -150,7 +154,7 @@ JNIEXPORT jlong JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_createRen
             stateError(env, @"Cannot create a Metal sampler.");
             return 0;
         }
-        return retainHandle(ctx);
+        return CuprumKeep(ctx, 0, @"renderer");
     }
 }
 
@@ -166,6 +170,7 @@ JNIEXPORT jlong JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_createBuf
         const void *data = directBytes(env, bytes, &size);
         if (!data)
             return 0;
+        if ((uint64_t)size > ctx.device.maxBufferLength) { argumentError(env, @"Buffer exceeds device limit."); return 0; }
         id<MTLBuffer> buffer = [ctx.device newBufferWithBytes:data
                                                        length:(NSUInteger)size
                                                       options:MTLResourceStorageModeShared];
@@ -173,7 +178,7 @@ JNIEXPORT jlong JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_createBuf
             stateError(env, @"Cannot allocate a shared Metal buffer.");
             return 0;
         }
-        return retainHandle(buffer);
+        return CuprumKeep(buffer, handle, @"buffer");
     }
 }
 
@@ -212,7 +217,7 @@ JNIEXPORT jlong JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_createTex
                    mipmapLevel:0
                      withBytes:data
                    bytesPerRow:(NSUInteger)width * 4];
-        return retainHandle(texture);
+        return CuprumKeep(texture, handle, @"texture");
     }
 }
 
@@ -230,6 +235,9 @@ JNIEXPORT jboolean JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_beginF
         }
         if (width <= 0 || height <= 0)
             return JNI_FALSE;
+        if (width > 16384 || height > 16384 || !isfinite(red) || !isfinite(green) || !isfinite(blue) || !isfinite(alpha)) {
+            argumentError(env, @"Invalid drawable size or clear color."); return JNI_FALSE;
+        }
         ctx.layer.drawableSize = CGSizeMake(width, height);
         ctx.drawable = [ctx.layer nextDrawable];
         if (!ctx.drawable)
@@ -277,9 +285,10 @@ JNIEXPORT void JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_draw(JNIEn
             argumentError(env, @"Draw resources and a positive vertex count are required.");
             return;
         }
-        id<MTLBuffer> vertexBuffer = (__bridge id<MTLBuffer>)(void *)(intptr_t)vertices;
-        id<MTLBuffer> uniformBuffer = (__bridge id<MTLBuffer>)(void *)(intptr_t)uniforms;
-        id<MTLTexture> colorTexture = (__bridge id<MTLTexture>)(void *)(intptr_t)texture;
+        id<MTLBuffer> vertexBuffer = CuprumGet(env, vertices, @"buffer", handle, NO);
+        id<MTLBuffer> uniformBuffer = CuprumGet(env, uniforms, @"buffer", handle, NO);
+        id<MTLTexture> colorTexture = CuprumGet(env, texture, @"texture", handle, NO);
+        if ((*env)->ExceptionCheck(env)) return;
         if (vertexBuffer.device != ctx.device || uniformBuffer.device != ctx.device ||
             colorTexture.device != ctx.device || vertexBuffer.length < (uint64_t)vertexCount * 24 ||
             uniformBuffer.length != 80) {
@@ -402,7 +411,7 @@ JNIEXPORT void JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_releaseRes
     if (!onMainThread(env))
         return;
     if (resource)
-        CFRelease((CFTypeRef)(void *)(intptr_t)resource);
+        CuprumRelease(env, resource);
 }
 JNIEXPORT void JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_destroyRenderer(JNIEnv *env,
                                                                                       jclass type,
@@ -422,7 +431,7 @@ JNIEXPORT void JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_destroyRen
         [drain commit];
         [drain waitUntilCompleted];
         ctx.layer.device = nil;
-        CFRelease((CFTypeRef)(void *)(intptr_t)handle);
+        CuprumRelease(env, handle);
     }
 }
 
@@ -447,4 +456,16 @@ JNIEXPORT jobjectArray JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_lo
             return NULL;
     }
     return result;
+}
+
+// SDL owns the borrowed layer pointer. No other JNI entry point accepts object addresses.
+JNIEXPORT jlong JNICALL Java_com_krishcpatel_cuprum_bridge_MetalNative_registerLayer(
+    JNIEnv *env, jclass type, jlong pointer) {
+    (void)type;
+    @autoreleasepool {
+        if (!onMainThread(env)) return 0;
+        if (!pointer) { argumentError(env, @"SDL did not provide a Metal layer."); return 0; }
+        CAMetalLayer *layer = (__bridge CAMetalLayer *)(void *)(intptr_t)pointer;
+        return CuprumKeep(layer, 0, @"layer");
+    }
 }

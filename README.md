@@ -1,7 +1,7 @@
 # Cuprum
 
 Cuprum replaces Minecraft Java **26.3** rendering with a direct **Apple Metal**
-backend. It targets Fabric Loader **0.19.5+**, Java **25**, and macOS **13+** with
+backend. It targets Fabric Loader **0.19.5+**, Java **25**, and macOS **11+** with
 an ARM64 or x86_64 Java runtime. Fabric API is not required.
 
 Minecraft 26.3 uses **RenderPearl and SDL3**. Cuprum implements RenderPearl's device,
@@ -29,7 +29,10 @@ ARM64/x86_64 dylib**, links Metal, Cocoa, Foundation and QuartzCore, and package
 at `native/macos-universal/libcuprum_metal.dylib` inside
 `build/libs/cuprum-0.1.0-SNAPSHOT.jar`. Install that jar in a Minecraft 26.3 Fabric
 profile. Native release jars must be built on macOS; Java compilation and platform
-checks can run elsewhere. The source jar includes both native source files.
+checks can run elsewhere. The source jar includes the native implementations and shared handle registry.
+Gradle daemon, compilation, test and development launch toolchains are pinned to
+Java 25. Apple clang uses `-O3 -fobjc-arc -Wall -Wextra -Werror` and a macOS 11.0
+deployment target for both architecture slices.
 
 `-XstartOnFirstThread` and `--enable-native-access=ALL-UNNAMED` are configured for
 development runs. Keep the launcher's macOS first-thread option enabled in normal
@@ -38,13 +41,18 @@ Minecraft profiles.
 ## Verification
 
 ```sh
-MTL_DEBUG_LAYER=1 ./gradlew test
-MTL_DEBUG_LAYER=1 ./gradlew nativeSmoke
+MTL_DEBUG_LAYER=1 METAL_DEVICE_WRAPPER_TYPE=1 ./gradlew test
+CUPRUM_MSL_VERSION=20300 MTL_DEBUG_LAYER=1 ./gradlew test --rerun-tasks
+MTL_DEBUG_LAYER=1 METAL_DEVICE_WRAPPER_TYPE=1 ./gradlew nativeSmoke
 ```
 
 The shader integration test compiles all **192 registered vanilla pipelines**, including
 terrain, entity, GUI, sky, clouds and post-processing, through Minecraft's GLSL/SPIR-V
-frontend into MSL and actual Metal PSOs. Native integration tests verify textured
+frontend into MSL and actual Metal PSOs, including supported depth attachment
+variants. MSL 2.4 is negotiated on macOS 12+, with MSL 2.3 on macOS 11;
+`CUPRUM_MSL_VERSION=20300` exercises the compatibility path on newer hosts.
+Native compilation happens during pipeline preparation, and draw-time variant
+selection only looks up prepared states. Native integration tests verify textured
 indexed rendering, uniform and texel-buffer
 bindings, blending, depth, scissor, partial clears, GPU triangle-fan expansion, timestamp
 queries inside and outside passes, asynchronous readback, atlas mip uploads,
@@ -52,12 +60,14 @@ independent lightmap/overlay sampler slots, triangle strips, odd texture row str
 repeated upload-arena reuse, offscreen scissors, unfinished-pass cleanup and callback
 failure recovery. Native tests run only on compatible Macs.
 `nativeSmoke` additionally opens a Metal window, renders and reads back 120 frames,
-checks resizing and cancellation, and rejects loaded Vulkan/MoltenVK libraries.
+checks resizing, fullscreen, minimization and cancellation, and rejects loaded
+LWJGL OpenGL/Vulkan/MoltenVK libraries. Apple system frameworks can transitively
+map `OpenGL.framework` even without a GL context; see the validation report.
 
 The actual Fabric client has been exercised through resource loading, title-screen
 rendering and a single-player world with Metal API validation on an **M1 Pro**.
-See [architecture and validation notes](docs/architecture.md). Universal Intel
-compilation is verified; Intel GPU execution and third-party shader packs remain
+See [architecture](docs/architecture.md) and the [validation report](docs/validation.md). Universal Intel
+compilation is verified; macOS 11 and Intel GPU execution and third-party shader packs remain
 unvalidated. This is an experimental renderer, not a claim of complete mod
 compatibility or a benchmarked performance improvement.
 

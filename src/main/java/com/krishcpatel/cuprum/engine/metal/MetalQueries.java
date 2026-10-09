@@ -12,7 +12,7 @@ import java.util.OptionalLong;
 final class MetalQueries implements GpuQueryPool {
     final MetalDevice device;
     private final int size;
-    private long handle;
+    long handle;
 
     MetalQueries(MetalDevice device, int size) {
         if (size <= 0) throw new IllegalArgumentException("Query pool size must be positive");

@@ -40,15 +40,19 @@ public final class MetalDevice implements GpuDeviceBackend, AutoCloseable {
     final Set<UncheckedAutoCloseable> resources = Collections.newSetFromMap(new IdentityHashMap<>());
     final MetalEncoder encoder;
     final DeviceInfo info;
+    final int mslVersion;
+    private final Object compilationLock = new Object();
+    private final Set<MetalPipeline> pendingPipelines = java.util.concurrent.ConcurrentHashMap.newKeySet();
     long handle;
 
     public MetalDevice() {
         MetalNative.load();
         handle = MetalBackendNative.createDevice();
         try {
+            mslVersion = MetalBackendNative.mslVersion(handle);
             var metal = CocoaMetalBridge.deviceInfo();
             long[] limits = MetalBackendNative.limits(handle);
-            info = new DeviceInfo(metal.name(), "Apple Metal", "Native Metal / MSL 2.4", true, "Metal", 1,
+            info = new DeviceInfo(metal.name(), "Apple Metal", "Native Metal / MSL " + (mslVersion == 20300 ? "2.3" : "2.4"), true, "Metal", 1,
                     new DeviceLimits(16, (int) limits[1], 16384, limits[0], 0, 8, 65535),
                     new DeviceFeatures(true, true, false, false, true, true, true, false), Set.of("Metal", "MSL"),
                     new HintsAndWorkarounds(false, false, false, false), metal.unifiedMemory() ? DeviceType.INTEGRATED : DeviceType.DISCRETE);
@@ -63,6 +67,7 @@ public final class MetalDevice implements GpuDeviceBackend, AutoCloseable {
     void checkThread() {
         if (Thread.currentThread() != thread)
             throw new IllegalStateException("Metal graphics commands must run on the render thread");
+        if (handle == 0) throw new IllegalStateException("Metal device is closed");
     }
 
     void requireOwned(Object resource) {
@@ -76,6 +81,16 @@ public final class MetalDevice implements GpuDeviceBackend, AutoCloseable {
             default -> false;
         };
         if (!owned) throw new IllegalArgumentException("Resource belongs to another Metal device");
+        boolean closed = switch (resource) {
+            case GpuBuffer b -> b.isClosed();
+            case GpuTexture t -> t.isClosed();
+            case GpuTextureView v -> v.isClosed();
+            case GpuSampler s -> s.isClosed();
+            case MetalPipeline p -> p.isClosed();
+            case MetalQueries q -> q.handle == 0;
+            default -> false;
+        };
+        if (closed) throw new IllegalStateException("Metal resource is closed");
     }
 
     @Override
@@ -126,22 +141,33 @@ public final class MetalDevice implements GpuDeviceBackend, AutoCloseable {
 
     @Override
     public List<String> getLastDebugMessages() {
-        return List.of();
+        checkThread();
+        return List.of(MetalBackendNative.debugMessages(handle));
     }
 
     @Override
     public boolean isDebuggingEnabled() {
-        return false;
+        return "1".equals(System.getenv("MTL_DEBUG_LAYER")) || "1".equals(System.getenv("METAL_DEVICE_WRAPPER_TYPE"));
+    }
+
+    /** Completed submission count, last GPU duration in ms, and completion interval in ms. */
+    public double[] frameMetrics() {
+        checkThread();
+        return MetalBackendNative.metrics(handle);
     }
 
     @Override
     public BackendRenderPipeline.Pending compilePipeline(BackendRenderPipeline.CreateInfo createInfo) {
-        // RenderPearl invokes this on compilation workers. Translation is thread-local;
-        // native PSOs are created lazily on the render thread for actual attachment formats.
-        MetalPipeline pipeline = new MetalPipeline(this, createInfo);
+        MetalPipeline pipeline;
+        synchronized (compilationLock) {
+            if (handle == 0) throw new IllegalStateException("Metal device is closed");
+            pipeline = new MetalPipeline(this, createInfo);
+            pendingPipelines.add(pipeline);
+        }
         return () -> {
             checkThread();
             resources.add(pipeline);
+            pendingPipelines.remove(pipeline);
             return pipeline;
         };
     }
@@ -168,12 +194,25 @@ public final class MetalDevice implements GpuDeviceBackend, AutoCloseable {
 
     @Override
     public void close() {
-        checkThread();
         if (handle == 0) return;
-        encoder.finishFrame();
-        encoder.close();
-        for (var r : List.copyOf(resources)) r.close();
-        MetalBackendNative.closeDevice(handle);
-        handle = 0;
+        checkThread();
+        synchronized (compilationLock) {
+            var cleanup = new java.util.ArrayList<Runnable>();
+            cleanup.add(encoder::finishPass);
+            for (var r : List.copyOf(resources)) if (r instanceof MetalSurface) cleanup.add(r::close);
+            cleanup.add(encoder::close);
+            for (var r : List.copyOf(resources)) if (!(r instanceof MetalSurface)) cleanup.add(r::close);
+            pendingPipelines.forEach(p -> cleanup.add(p::close));
+            Throwable failure = null;
+            for (var action : cleanup) try { action.run(); }
+            catch (RuntimeException | Error error) {
+                if (failure == null) failure = error;
+                else if (failure != error) failure.addSuppressed(error);
+            }
+            try { MetalBackendNative.closeDevice(handle); }
+            finally { handle = 0; pendingPipelines.clear(); }
+            if (failure instanceof RuntimeException error) throw error;
+            if (failure instanceof Error error) throw error;
+        }
     }
 }

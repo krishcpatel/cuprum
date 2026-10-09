@@ -11,6 +11,13 @@ public final class MetalBackendNative {
     }
 
     public static native long createDevice();
+    public static native int mslVersion(long device);
+    public static native int[] depthFormats(long device);
+    public static native String[] debugMessages(long device);
+    public static native double[] metrics(long device);
+    public static native long[] cacheStats(long device);
+    public static native void discardDrawable(long device);
+    public static native void generateMipmaps(long device, long texture);
 
     public static native long currentGpuTimestamp(long device);
 

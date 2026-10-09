@@ -45,6 +45,7 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
         for (int i = 0; i < colors.length; i++) {
             var a = descriptor.colorAttachments().get(i);
             if (a != null) {
+                device.requireOwned(a.textureView());
                 colors[i] = ((MetalResources.View) a.textureView()).handle();
                 if (a.clearValue().isPresent()) {
                     var c = a.clearValue().get();
@@ -57,6 +58,7 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
             }
         }
         var depth = descriptor.depthAttachment();
+        if (depth != null) device.requireOwned(depth.textureView());
         depthFormat = depth == null ? -1 : depth.textureView().texture().getFormat().ordinal();
         var area = descriptor.renderArea();
         MetalBackendNative.beginPass(device.handle, colors, clear, depth == null ? 0 : ((MetalResources.View) depth.textureView()).handle(), depth == null ? -1 : depth.clearValue().orElse(-1), area.x(), area.y(), area.width(), area.height());
@@ -66,8 +68,9 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
     public void setPipeline(BackendRenderPipeline pipeline) {
         check();
         device.requireOwned(pipeline);
-        this.pipeline = (MetalPipeline) pipeline;
-        MetalBackendNative.bindPipeline(device.handle, this.pipeline.variant(depthFormat));
+        var next = (MetalPipeline) pipeline;
+        MetalBackendNative.bindPipeline(device.handle, next.variant(depthFormat));
+        this.pipeline = next;
     }
 
     @Override
@@ -76,13 +79,18 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
         if (pipeline == null) throw new IllegalStateException("Bind a pipeline before uniforms");
         if (index < 0 || index >= pipeline.info.uniforms().size())
             throw new IllegalArgumentException("Uniform binding outside pipeline layout: " + index);
-        if (value == null) return;
+        if (value == null) {
+            if (pipeline.info.uniforms().get(index).type() == UniformType.UNIFORM_BUFFER)
+                MetalBackendNative.bindBuffer(device.handle, index, 0, 0);
+            else MetalBackendNative.bindTexture(device.handle, index, 0, 0);
+            return;
+        }
         if (value instanceof TextureViewAndSampler pair) {
             device.requireOwned(pair.view());
             device.requireOwned(pair.sampler());
             MetalBackendNative.bindTexture(device.handle, index, ((MetalResources.View) pair.view()).handle(), ((MetalResources.Sampler) pair.sampler()).handle());
         } else if (value instanceof GpuBufferSlice slice) {
-            device.requireOwned(slice.buffer());
+            MetalChecks.slice(device, slice);
             var buffer = (MetalResources.Buffer) slice.buffer();
             if (pipeline.info.uniforms().get(index).type() == UniformType.TEXEL_BUFFER) {
                 long view = MetalBackendNative.texelView(device.handle, buffer.handle(), slice.offset(), slice.length(), pipeline.info.uniforms().get(index).gpuFormat().ordinal());
@@ -95,6 +103,9 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
     @Override
     public void pushConstants(ByteBuffer bytes) {
         check();
+        requirePipeline();
+        if (bytes.remaining() > pipeline.info.pushConstantsSize()) throw new IllegalArgumentException("Push constants exceed pipeline declaration");
+        if (!bytes.hasRemaining()) return;
         var slice = encoder.transientMemory.uploadGpu(bytes, device.info.limits().minUniformOffsetAlignment(), GpuBuffer.USAGE_UNIFORM);
         MetalBackendNative.bindBuffer(device.handle, 15, ((MetalResources.Buffer) slice.buffer()).handle(), slice.offset());
     }
@@ -102,7 +113,7 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
     @Override
     public void setVertexBuffer(int slot, GpuBufferSlice buffer) {
         check();
-        if (buffer != null) device.requireOwned(buffer.buffer());
+        if (buffer != null) MetalChecks.slice(device, buffer);
         if (slot < 0 || slot >= 15)
             throw new IllegalArgumentException("Metal exposes 15 vertex slots after reserving constant bindings");
         MetalBackendNative.bindBuffer(device.handle, slot + 16, buffer == null ? 0 : ((MetalResources.Buffer) buffer.buffer()).handle(), buffer == null ? 0 : buffer.offset());
@@ -113,7 +124,23 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
         check();
         if (buffer != null) device.requireOwned(buffer);
         indices = buffer;
-        indexType = type;
+        indexType = java.util.Objects.requireNonNull(type);
+    }
+
+    private void requirePipeline() {
+        if (pipeline == null || pipeline.isClosed()) throw new IllegalStateException("Bind an open Metal pipeline before drawing");
+    }
+
+    private void drawArguments(int count, int instances, int first, int baseInstance) {
+        requirePipeline();
+        if (count < 0 || instances < 0 || first < 0 || baseInstance < 0) throw new IllegalArgumentException("Negative draw count, index or instance");
+    }
+
+    private void indirectArguments(GpuBufferSlice commands, int count, int stride) {
+        requirePipeline();
+        MetalChecks.slice(device, commands);
+        if (count < 0 || commands.offset() % 4 != 0) throw new IllegalArgumentException("Invalid indirect draw count or alignment");
+        MetalChecks.range(0, (long) count * stride, commands.length());
     }
 
     private int primitive() {
@@ -129,6 +156,10 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
     @Override
     public void drawIndexed(int count, int instances, int first, int baseVertex, int baseInstance) {
         check();
+        drawArguments(count, instances, first, baseInstance);
+        device.requireOwned(indices);
+        MetalChecks.range((long) first * indexType.bytes, (long) count * indexType.bytes, indices.size());
+        if (count == 0 || instances == 0) return;
         if (pipeline.info.primitiveTopology() == PrimitiveTopology.TRIANGLE_FAN) {
             MetalBackendNative.drawIndexedFan(device.handle, count, instances, ((MetalResources.Buffer) indices).handle(), (long) first * indexType.bytes, indexType.ordinal(), baseVertex, baseInstance);
             return;
@@ -139,19 +170,23 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
     @Override
     public void draw(int count, int instances, int first, int baseInstance) {
         check();
+        drawArguments(count, instances, first, baseInstance);
+        if (count == 0 || instances == 0) return;
         if (pipeline.info.primitiveTopology() == PrimitiveTopology.TRIANGLE_FAN) {
             if (count < 3) return;
             int elements = Math.multiplyExact(count - 2, 3);
-            var mapped = encoder.transientMemory.allocateGpuMapped((long) elements * 4, 4, GpuBuffer.USAGE_INDEX);
+            try (var mapped = encoder.transientMemory.allocateGpuMapped((long) elements * 4, 4, GpuBuffer.USAGE_INDEX)) {
             var data = mapped.data().order(java.nio.ByteOrder.nativeOrder()).asIntBuffer();
             for (int i = 1; i < count - 1; i++) data.put(first).put(first + i).put(first + i + 1);
             MetalBackendNative.draw(device.handle, 3, elements, instances, 0, baseInstance, ((MetalResources.Buffer) mapped.slice().buffer()).handle(), mapped.slice().offset(), 1, 0);
+            }
         } else MetalBackendNative.draw(device.handle, primitive(), count, instances, first, baseInstance, 0, 0, 0, 0);
     }
 
     @Override
     public void multiDrawIndexed(IntBuffer draws, int instances, int firstInstance, int count) {
         check();
+        MetalChecks.range(0, (long) count * 3, draws.remaining());
         for (int i = 0; i < count; i++) {
             int b = draws.position() + i * 3;
             drawIndexed(draws.get(b + 1), instances, draws.get(b), draws.get(b + 2), firstInstance);
@@ -161,13 +196,21 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
     @Override
     public void multiDrawIndexed(PointerBuffer offsets, IntBuffer counts, IntBuffer bases, int count) {
         check();
+        MetalChecks.range(0, count, offsets.remaining());
+        MetalChecks.range(0, count, counts.remaining());
+        MetalChecks.range(0, count, bases.remaining());
         for (int i = 0; i < count; i++)
-            drawIndexed(counts.get(counts.position() + i), 1, (int) (offsets.get(offsets.position() + i) / indexType.bytes), bases.get(bases.position() + i), 0);
+            {
+                long offset = offsets.get(offsets.position() + i);
+                if (offset < 0 || offset % indexType.bytes != 0) throw new IllegalArgumentException("Invalid index byte offset");
+                drawIndexed(counts.get(counts.position() + i), 1, Math.toIntExact(offset / indexType.bytes), bases.get(bases.position() + i), 0);
+            }
     }
 
     @Override
     public void multiDraw(IntBuffer draws, int instances, int base, int count) {
         check();
+        MetalChecks.range(0, (long) count * 2, draws.remaining());
         for (int i = 0; i < count; i++)
             draw(draws.get(draws.position() + i * 2 + 1), instances, draws.get(draws.position() + i * 2), base);
     }
@@ -175,12 +218,15 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
     @Override
     public void multiDraw(IntBuffer first, IntBuffer counts, int count) {
         check();
+        MetalChecks.range(0, count, first.remaining());
+        MetalChecks.range(0, count, counts.remaining());
         for (int i = 0; i < count; i++) draw(counts.get(counts.position() + i), 1, first.get(first.position() + i), 0);
     }
 
     @Override
     public void drawIndirect(GpuBufferSlice commands, int count) {
         check();
+        indirectArguments(commands, count, 16);
         for (int i = 0; i < count; i++) {
             if (pipeline.info.primitiveTopology() == PrimitiveTopology.TRIANGLE_FAN)
                 MetalBackendNative.drawIndirectFan(device.handle, ((MetalResources.Buffer) commands.buffer()).handle(), commands.offset() + (long) i * 16, 0, 0);
@@ -192,6 +238,8 @@ final class MetalPass implements RenderPassBackend, AutoCloseable {
     @Override
     public void drawIndexedIndirect(GpuBufferSlice commands, int count) {
         check();
+        indirectArguments(commands, count, 20);
+        device.requireOwned(indices);
         for (int i = 0; i < count; i++) {
             if (pipeline.info.primitiveTopology() == PrimitiveTopology.TRIANGLE_FAN)
                 MetalBackendNative.drawIndirectFan(device.handle, ((MetalResources.Buffer) commands.buffer()).handle(), commands.offset() + (long) i * 20, ((MetalResources.Buffer) indices).handle(), indexType.ordinal());

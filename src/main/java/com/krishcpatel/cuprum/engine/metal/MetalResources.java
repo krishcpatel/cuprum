@@ -14,6 +14,7 @@ import com.mojang.renderpearl.backend.common.BaseGpuTextureView;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.OptionalDouble;
+import java.util.function.BooleanSupplier;
 
 final class MetalResources {
     private MetalResources() {
@@ -24,6 +25,8 @@ final class MetalResources {
         final long size;
         final int usage;
         final boolean transientAllocation;
+        private final Buffer parent;
+        private final BooleanSupplier valid;
         long handle;
 
         Buffer(MetalDevice owner, int usage, long size, boolean transientAllocation) {
@@ -33,13 +36,25 @@ final class MetalResources {
             this.usage = usage;
             this.size = size;
             this.transientAllocation = transientAllocation;
+            parent = null;
+            valid = () -> true;
             handle = MetalBackendNative.buffer(owner.handle, size);
             owner.resources.add(this);
         }
 
+        Buffer(Buffer parent, BooleanSupplier valid) {
+            this.parent = parent;
+            this.valid = valid;
+            owner = parent.owner;
+            size = parent.size;
+            usage = parent.usage;
+            transientAllocation = true;
+            handle = parent.handle();
+        }
+
         long handle() {
             owner.checkThread();
-            if (handle == 0) throw new IllegalStateException("Buffer is closed");
+            if (isClosed()) throw new IllegalStateException("Buffer is closed or its transient arena was reused");
             return handle;
         }
 
@@ -61,7 +76,7 @@ final class MetalResources {
 
         @Override
         public boolean isClosed() {
-            return handle == 0;
+            return handle == 0 || !valid.getAsBoolean() || (parent != null && parent.isClosed());
         }
 
         @Override
@@ -70,15 +85,30 @@ final class MetalResources {
                 throw new IllegalArgumentException("Buffer was not allocated with the requested map usage");
             // RenderPearl fences write-mapped ring buffers before reusing their slots.
             if (read && !transientAllocation) owner.encoder.sync();
-            return new GpuBufferSlice.MappedView(slice(offset, length), bytes(offset, length), () -> {
+            if (!read && !write) throw new IllegalArgumentException("A map needs read or write access");
+            return pinnedMap(offset, length);
+        }
+
+        GpuBufferSlice.MappedView pinnedMap(long offset, long length) {
+            ByteBuffer data = bytes(offset, length);
+            long pin = MetalBackendNative.retain(handle());
+            boolean[] released = {false};
+            return new GpuBufferSlice.MappedView(slice(offset, length), data, () -> {
+                if (Thread.currentThread() != owner.thread) throw new IllegalStateException("Close mapped data on its render thread");
+                if (!released[0]) {
+                    released[0] = true;
+                    data.clear().limit(0);
+                    MetalBackendNative.release(pin);
+                }
             });
         }
 
         @Override
         public void close() {
+            if (handle == 0) return;
             owner.checkThread();
             if (handle != 0) {
-                MetalBackendNative.release(handle);
+                if (parent == null) MetalBackendNative.release(handle);
                 handle = 0;
                 owner.resources.remove(this);
             }
@@ -119,6 +149,7 @@ final class MetalResources {
 
         @Override
         public void close() {
+            if (handle == 0) return;
             owner.checkThread();
             if (handle != 0) {
                 MetalBackendNative.release(handle);
@@ -152,6 +183,7 @@ final class MetalResources {
 
         @Override
         public void close() {
+            if (handle == 0) return;
             owner.checkThread();
             if (handle != 0) {
                 MetalBackendNative.release(handle);
@@ -224,6 +256,7 @@ final class MetalResources {
 
         @Override
         public void close() {
+            if (handle == 0) return;
             owner.checkThread();
             if (handle != 0) {
                 MetalBackendNative.release(handle);

@@ -16,7 +16,7 @@ public final class HostPlatform {
     public static Optional<String> unsupportedReason(String os, String arch, String version) {
         String normalized = os.toLowerCase(Locale.ROOT);
         if (!(normalized.equals("mac os x") || normalized.equals("macos") || normalized.equals("darwin"))) {
-            return Optional.of("Cuprum requires macOS 13 or newer; detected " + os + ".");
+            return Optional.of("Cuprum requires macOS 11 or newer; detected " + os + ".");
         }
         if (!(arch.equalsIgnoreCase("aarch64") || arch.equalsIgnoreCase("arm64")
                 || arch.equalsIgnoreCase("x86_64") || arch.equalsIgnoreCase("amd64"))) {
@@ -24,13 +24,13 @@ public final class HostPlatform {
                     + ". Install Java 25 for your Mac architecture.");
         }
         try {
-            if (Integer.parseInt(version.split("\\.")[0]) >= 13) {
+            if (Integer.parseInt(version.split("\\.")[0]) >= 11) {
                 return Optional.empty();
             }
         } catch (NumberFormatException ignored) {
             // Fail closed if the operating system version cannot be established.
         }
-        return Optional.of("Cuprum requires macOS 13 or newer; detected version " + version + ".");
+        return Optional.of("Cuprum requires macOS 11 or newer; detected version " + version + ".");
     }
 
     public static void requireSupported() {

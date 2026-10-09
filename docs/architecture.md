@@ -18,7 +18,7 @@ and SPIRV-Cross is a shader compiler, not a Vulkan driver.
 ## Window and backend selection
 
 `BackendSelectionMixin` selects Cuprum by default on supported Macs. The native
-library bootstrap bypasses Minecraft's Vulkan loader. `CuprumBackend` creates an
+library bootstrap bypasses Minecraft's OpenGL and Vulkan driver loaders. `CuprumBackend` creates an
 `SDL_WINDOW_METAL` window without OpenGL or Vulkan flags, then returns a
 `FrontendGpuDevice` backed by `MetalDevice`.
 
@@ -26,8 +26,11 @@ library bootstrap bypasses Minecraft's Vulkan loader. `CuprumBackend` creates an
 queries contentView and backingScaleFactor using ABI-correct Objective-C calls.
 `SDL_Metal_CreateView` creates and owns the layer-hosting NSView and CAMetalLayer,
 preserving SDL's input and resize handling. The attachment owns the SDL Metal view
-and destroys it on the macOS main thread. Surface acquisition refreshes Retina
-scale and sets drawableSize from the framebuffer configuration in pixels.
+and destroys it on the macOS main thread. The borrowed SDL layer address is
+imported once into a typed, retained JNI handle. Surface acquisition refreshes Retina
+scale and sets drawableSize from the framebuffer configuration in pixels. SDL pixel
+extents and Cocoa scale changes mark the surface suboptimal, so Minecraft can
+reconfigure after resize or display migration.
 
 Minecraft 26.3 has no GLFW window, `BufferRenderer.drawWithShader`, or old
 Tessellator flush contract. Implementing its backend interfaces intercepts all
@@ -39,7 +42,8 @@ window diagnostics, RenderSystem diagnostics and the frame presentation boundary
 
 RenderPearl compiles each vanilla GLSL variant to SPIR-V and remaps attributes and
 uniform bindings. `MetalPipeline` translates those modules with a separate
-SPIRV-Cross context per compilation worker. It requests MSL 2.4, native texture
+SPIRV-Cross context per compilation worker. Native and translated shaders use the
+same negotiated MSL version: 2.4 on macOS 12+, 2.3 on macOS 11. It requests native texture
 buffers, and a vertex Y flip matching RenderPearl's zero-to-one coordinate
 convention. Counter-clockwise source geometry becomes clockwise after this flip;
 the native render encoder uses clockwise front faces. Presentation performs the
@@ -52,14 +56,24 @@ sampler slots match the frontend's uniform binding indices. Extra bindings fail
 with a clear error rather than silently aliasing slots.
 
 Translated source and entry points outlive the SPIR-V modules. Native shader
-libraries are cached by source; immutable PSOs and their native binding reflection
-are cached per Java pipeline and actual depth attachment format. Vertex descriptors
-are flattened and checked once during translation. Native depth states and samplers
-are shared through device-owned caches, with independent retained JNI handles. PSOs carry attachment formats, blend equations,
-write masks and depth state. Culling, wireframe and depth bias are set when binding
-the pipeline. Current RenderPearl exposes depth/bias through DepthStencilState;
-it does not expose legacy GlStateManager stencil operations. Packed depth/stencil
-attachments are retained across passes, without inventing nonexistent stencil hooks.
+libraries are cached by source. Native compilation happens during `compilePipeline`,
+including every supported depth format, on Minecraft's preparation workers.
+`ShaderManager.reload` prepares both required and optional vanilla pipelines before
+applying the resource reload. `variant()` performs a lookup and never compiles.
+Presentation, fan expansion and common clear shaders are compiled during device
+initialization. Clear shaders for additional formats are prepared when those
+render targets are allocated, before a clear can be submitted.
+
+A device-wide immutable PSO key includes shader sources and entry points, flattened
+vertex attributes and layouts, color attachment formats and blend states, depth and
+stencil attachment formats, and the contract's sample count of one. Identical PSOs
+share a native pipeline even when their dynamic raster or depth state differs.
+Native binding reflection, depth states and samplers are cached separately.
+Culling, wireframe and depth bias are set when binding the pipeline. Current
+RenderPearl exposes a cull boolean and depth/bias through `DepthStencilState`;
+it has no front-cull selector, winding selector, depth-bounds range or stencil-test
+mask interface. Packed depth/stencil attachments are retained across passes.
+These absent API settings are not advertised as implemented hooks.
 
 Metal cannot sample three-component RGB texture formats; these are rejected.
 D24/S8 is used only on devices advertising that format, never reinterpreted as
@@ -79,21 +93,28 @@ Render pass splits preserve attachments, bindings, viewport, scissor and debug g
 Buffers use shared storage. Three upload arenas hold reusable pages, fence every
 submission and wait only when reusing an arena whose GPU work is unfinished.
 Write-mapped Minecraft ring buffers rely on Minecraft's fences before reuse;
-read maps synchronize. Uniform allocations include trailing padding required by
+read maps synchronize. Java validates logical buffer ranges independently of native
+allocation padding. Mapped views pin their storage until close; transient slices
+expire before their arena is reused and submission rejects active transient maps.
+Uniform allocations include trailing padding required by
 MSL structure alignment, while Java exposes the requested logical byte length.
 Misaligned texel-buffer slices are copied into aligned storage before binding.
 
 Textures use private storage, with shared staging buffers for transfers. CPU pixel
 uploads and readbacks use padded rows; readback callbacks strip that padding after
-GPU completion. Callback polling happens before an arena can overwrite its staging
+GPU completion. GPU mipmap generation uses a blit encoder. Callback polling happens before an arena can overwrite its staging
 pages. Completed command buffers remain retained until all owning fences and
 callbacks release them. Encoded Metal commands retain their resource objects, so
 closing a Java resource does not free an allocation already referenced by a command.
 
 All queue encoding and resource management occur on the creating render thread.
-Only shader translation runs on compilation workers. JNI objects have explicit
-retained handles, ARC ownership and per-call autorelease pools. Device shutdown
-waits for submitted work, completes callbacks and closes owned resources.
+Shader translation and native PSO preparation run on compilation workers. JNI
+objects use opaque monotonic tokens in a shared registry with type, owning device,
+reference count and owning-thread checks. Java and native checks reject stale or
+foreign resources, invalid offsets, descriptors and texture regions before encoding.
+ARC ownership and per-call autorelease pools manage native objects. Device shutdown
+waits for submitted work, completes or cancels callbacks, closes owned resources and
+synchronizes with pipeline preparation. Callback cleanup runs even after failures.
 
 ## Presentation and timestamps
 
@@ -106,7 +127,8 @@ acquired reference. An already submitted frame does not advance upload arenas tw
 command buffers and completion handlers release permits.
 
 Zero-sized or iconified surfaces produce SurfaceException and let Minecraft retry;
-configuration changes resize the layer on the next acquisition. FIFO and immediate
+drawable timeouts also let Minecraft retry. Configuration changes resize the layer
+on the next acquisition. FIFO and immediate
 presentation map to CAMetalLayer.displaySyncEnabled.
 
 Minecraft constructs TimerQuery unconditionally. Query pools use actual Metal
@@ -123,18 +145,9 @@ Calibration samples the device GPU clock against Java's monotonic clock.
 small independent MSL rendering diagnostic used by `NativeSmoke`. Both native
 implementations are linked into one universal macOS dylib; neither links Vulkan.
 
-Verification includes compilation of all 192 required and optional registered vanilla
-pipelines through the actual game frontend into native Metal PSOs. This catches
-MSL compile errors across every shader define and reflected vertex layout. It also
-includes offscreen scissor clipping, unfinished-pass finalization and failing
-readback callback cleanup, the native GPU readback test and a Java encoder test with
-12 submissions, asynchronous callbacks and repeated arena rotation. The Fabric
-client loaded vanilla shaders and texture atlases, rendered the title screen and
-entered a single-player world on an M1 Pro under Metal API validation. GPU frame
-captures were inspected for lighting, textures, text and orientation. A process
-library map showed Cuprum's Metal dylib with no Vulkan loader or MoltenVK.
-
-Intel compilation is verified by the universal binary's two architecture slices.
-Intel runtime behavior, shader packs, extensive mod compatibility, all dimensions
-and long-duration performance are not established by this validation. Direct, indexed and indirect fan conversion is covered by the native test. No general performance
-improvement is claimed from a single development session.
+Command buffer completion handlers collect bounded GPU error and shader logs.
+`getDebugMessages()` drains those diagnostics; frame metrics use completed command
+buffers' GPU execution durations and completion intervals. See the dated
+[validation report](validation.md) for commands, captures and the limits of the
+hardware and visual checks. Hosted CI builds the universal binary and runs platform
+tests; the separate physical-Mac workflow runs the full GPU test suite.

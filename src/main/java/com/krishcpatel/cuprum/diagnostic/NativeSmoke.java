@@ -6,6 +6,11 @@ import com.krishcpatel.cuprum.bridge.MetalNative;
 import com.krishcpatel.cuprum.engine.CuprumPipeline;
 import com.krishcpatel.cuprum.engine.HostPlatform;
 import com.krishcpatel.cuprum.engine.MetalRenderer;
+import com.krishcpatel.cuprum.engine.metal.MetalDevice;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.device.GpuSurface;
+import com.mojang.renderpearl.api.device.SurfaceException;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 import org.lwjgl.sdl.SDL_Event;
 import org.lwjgl.system.MemoryStack;
 
@@ -23,6 +28,12 @@ import static org.lwjgl.sdl.SDLVideo.SDL_CreateWindow;
 import static org.lwjgl.sdl.SDLVideo.SDL_DestroyWindow;
 import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowSizeInPixels;
 import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowSize;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowFullscreen;
+import static org.lwjgl.sdl.SDLVideo.SDL_MinimizeWindow;
+import static org.lwjgl.sdl.SDLVideo.SDL_RestoreWindow;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowFlags;
+import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_MINIMIZED;
+import static org.lwjgl.sdl.SDLVideo.SDL_SyncWindow;
 import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_HIGH_PIXEL_DENSITY;
 import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_METAL;
 import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_RESIZABLE;
@@ -31,7 +42,7 @@ import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_RESIZABLE;
 public final class NativeSmoke {
     private NativeSmoke() { }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws SurfaceException {
         HostPlatform.requireSupported();
         if (!SDL_Init(SDL_INIT_VIDEO)) throw new IllegalStateException(SDL_GetError());
         try {
@@ -40,11 +51,56 @@ public final class NativeSmoke {
             if (window == 0) throw new IllegalStateException(SDL_GetError());
             try {
                 render(window);
+                renderBackendSurface(window);
             } finally {
                 SDL_DestroyWindow(window);
             }
         } finally {
             SDL_Quit();
+        }
+    }
+
+    private static void renderBackendSurface(long window) throws SurfaceException {
+        try (var device = new MetalDevice(); var surface = device.createSurface(window,
+                () -> (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != 0);
+             var source = device.createTexture("surface smoke", GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING,
+                     GpuFormat.RGBA8_UNORM, 16, 16, 1, 1);
+             var view = device.createTextureView(source, 0, 1);
+             var stack = MemoryStack.stackPush()) {
+            var encoder = device.createCommandEncoder();
+            var width = stack.mallocInt(1); var height = stack.mallocInt(1);
+            var event = SDL_Event.calloc(stack);
+            boolean resized = false;
+            int configuredWidth = -1;
+            for (int frame=0; frame<36; frame++) {
+                while (SDL_PollEvent(event)) { }
+                if (frame == 12 && !SDL_SetWindowSize(window, 720, 400)) throw new IllegalStateException(SDL_GetError());
+                if (frame == 24 && (!SDL_SetWindowFullscreen(window, true) || !SDL_SyncWindow(window))) throw new IllegalStateException(SDL_GetError());
+                if (!SDL_GetWindowSizeInPixels(window, width, height)) throw new IllegalStateException(SDL_GetError());
+                if (surface.isSuboptimal()) {
+                    if (configuredWidth > 0 && width.get(0) != configuredWidth) resized = true;
+                    surface.configure(new GpuSurface.Configuration(width.get(0), height.get(0), GpuSurface.PresentMode.FIFO));
+                    configuredWidth = width.get(0);
+                }
+                surface.acquireNextTexture();
+                try {
+                    surface.configure(new GpuSurface.Configuration(width.get(0), height.get(0), GpuSurface.PresentMode.FIFO));
+                    throw new AssertionError("An acquired surface accepted reconfiguration");
+                } catch (SurfaceException expected) { }
+                encoder.clearColorTexture(source, new org.joml.Vector4f(0.2f, 0.4f, 0.6f, 1));
+                surface.blitFromTexture(encoder, view);
+                surface.present();
+            }
+            if (!resized) throw new AssertionError("The backend failed to detect a changed pixel extent");
+            if (!SDL_SetWindowFullscreen(window, false) || !SDL_SyncWindow(window) || !SDL_MinimizeWindow(window) || !SDL_SyncWindow(window))
+                throw new IllegalStateException(SDL_GetError());
+            while (SDL_PollEvent(event)) { }
+            try { surface.acquireNextTexture(); throw new AssertionError("Minimized surface acquired a drawable"); }
+            catch (SurfaceException expected) { }
+            if (!SDL_RestoreWindow(window) || !SDL_SyncWindow(window)) throw new IllegalStateException(SDL_GetError());
+            while (SDL_PollEvent(event)) { }
+            if (!device.getLastDebugMessages().isEmpty()) throw new AssertionError("Metal reported backend validation errors");
+            System.out.println("PASS: RenderPearl Metal surface presentation, resize, fullscreen, minimization and reconfiguration guards.");
         }
     }
 
@@ -109,11 +165,13 @@ public final class NativeSmoke {
                 }
                 for (String image : MetalNative.loadedImagePaths()) {
                     String path = image.toLowerCase(Locale.ROOT);
-                    if (path.contains("moltenvk") || path.contains("libvulkan")) {
-                        throw new AssertionError("A Vulkan library was loaded during direct Metal rendering: " + image);
+                    if (path.contains("moltenvk") || path.contains("libvulkan") || path.contains("liblwjgl_opengl")) {
+                        throw new AssertionError("A non-Metal graphics library was loaded during direct Metal rendering: " + image);
                     }
                 }
-                System.out.println("PASS: no Vulkan loader or MoltenVK dylib loaded in this process.");
+                System.out.println("PASS: no LWJGL OpenGL driver, Vulkan loader or MoltenVK dylib loaded in this process.");
+                if (java.util.Arrays.stream(MetalNative.loadedImagePaths()).anyMatch(p -> p.contains("/OpenGL.framework/")))
+                    System.out.println("NOTE: Apple's required system frameworks transitively map OpenGL.framework; Cuprum does not create a GL context or call its rendering API.");
                 System.out.println("PASS: 120 direct Metal textured frames, GPU pixel readback, resize, zero-extent skip and frame cancellation.");
             }
         }

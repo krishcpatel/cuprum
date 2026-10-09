@@ -19,6 +19,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.stream.Stream;
+import com.krishcpatel.cuprum.bridge.MetalBackendNative;
+import java.util.concurrent.Executors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -29,24 +31,34 @@ class VanillaPipelineTest {
 
     @Test
     void allVanillaPipelinesCompileToNativeMetal() {
-        try (var device = new MetalDevice(); var builder = new PipelineBuilder(device); var sources = new VanillaSources()) {
+        try (var device = new MetalDevice(); var builder = new PipelineBuilder(device); var sources = new VanillaSources();
+             var compiler = Executors.newSingleThreadExecutor()) {
             RenderSystem.initRenderThread();
             RenderSystem.initRenderer(new FrontendGpuDevice(device));
             try {
                 var pipelines = Stream.concat(RenderPipelines.requiredPipelines().stream(), RenderPipelines.optionalPipelines().stream()).toList();
-                assertTrue(pipelines.size() > 50, "Vanilla pipeline registry must be populated");
+                assertEquals(192, pipelines.size(), "Audit the pipeline inventory when changing Minecraft versions");
+                if ("20300".equals(System.getenv("CUPRUM_MSL_VERSION"))) assertEquals(20300, device.mslVersion);
                 for (var pipeline : pipelines) {
-                    var pending = builder.compilePipeline(pipeline, sources, Runnable::run).join();
+                    var pending = builder.compilePipeline(pipeline, sources, compiler).join();
                     try (var compiled = pending.finishCompile()) {
                         assertNotNull(compiled, () -> "Failed vanilla shader: " + pipeline.getLocation());
                         var metal = (MetalPipeline) ((FrontendRenderPipeline) compiled).backendRenderPipeline();
                         int depth = pipeline.wantsDepthTexture() ? GpuFormat.D32_FLOAT.ordinal() : -1;
+                        long[] prepared = MetalBackendNative.cacheStats(device.handle);
                         long state = metal.variant(depth);
                         assertNotEquals(0, state, () -> "Failed Metal PSO: " + pipeline.getLocation());
                         assertEquals(state, metal.variant(depth), "Repeated format must reuse its PSO");
+                        assertArrayEquals(prepared, MetalBackendNative.cacheStats(device.handle), "Binding must not compile native shaders or PSOs");
+                        var duplicatePending = builder.compilePipeline(pipeline, sources, compiler).join();
+                        try (var duplicate = duplicatePending.finishCompile()) {
+                            var same = (MetalPipeline) ((FrontendRenderPipeline) duplicate).backendRenderPipeline();
+                            assertEquals(state, same.variant(depth), "Identical pipelines must share native state across Java objects");
+                            assertArrayEquals(prepared, MetalBackendNative.cacheStats(device.handle), "Duplicate preparation must reuse libraries and PSOs");
+                        }
                     }
                 }
-                System.out.println("PASS: " + pipelines.size() + " vanilla pipelines compiled through GLSL, SPIR-V, MSL and native PSOs.");
+                System.out.println("PASS: " + pipelines.size() + " vanilla pipelines compiled through GLSL, SPIR-V, MSL " + device.mslVersion + " and native PSOs on a compiler worker; duplicate preparation and binding caused no additional compilation.");
             } finally {
                 RenderSystem.shutdownRenderer();
             }
